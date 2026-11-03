@@ -39,8 +39,10 @@ TASK_LABELS: dict[Task, frozenset[str]] = {
     Task.EVENT: frozenset({"hack", "outage", "listing", "regulatory_action", "none"}),
 }
 MULTI_LABEL_TASKS = frozenset({Task.TOPIC, Task.ENTITY})
-# Entity labels name the type and the linked entity, e.g. "token:BTC" or "exchange:binance".
+# Entity labels name the type and the linked entity, e.g. "token:BTC" or "exchange:binance";
+# "none" alone when the post names no entity in scope (the labeling manual, task 5).
 ENTITY_LABEL_RE = re.compile(r"^(token|project|exchange):[a-z0-9_.-]+$", re.IGNORECASE)
+NO_ENTITY = "none"
 
 
 class Annotator(StrEnum):
@@ -70,7 +72,9 @@ class Label(Record):
         if self.task not in MULTI_LABEL_TASKS and len(self.values) != 1:
             raise ValueError(f"task {self.task} takes exactly one label")
         if self.task is Task.ENTITY:
-            bad = [v for v in self.values if not ENTITY_LABEL_RE.match(v)]
+            if NO_ENTITY in self.values and len(self.values) > 1:
+                raise ValueError(f"entity {NO_ENTITY!r} cannot go with other entities")
+            bad = [v for v in self.values if v != NO_ENTITY and not ENTITY_LABEL_RE.match(v)]
         else:
             bad = [v for v in self.values if v not in TASK_LABELS[self.task]]
         if bad:

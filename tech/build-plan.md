@@ -154,41 +154,48 @@ Each milestone also unlocks a sentence in the article's "Considerações finais 
 - Deployed to the main database on 3 Nov 2026, empty. Never write test rows there: ledger rows are permanent
 
 ### Step 3. Normalize
-- [ ] Language filter (English)
-- [ ] Exact and near-duplicate removal
-- [ ] Cashtag, ticker and contract-address extraction
-- [ ] Keyed hash of author IDs, with the secret outside the repo
-- [ ] Spam rules
-- [ ] **Check:** sample reviewed by hand
+Into `clean.posts` (`db/init/004_clean.sql`), every 10 minutes. Filters set flags rather than dropping rows, so the rates can be audited; `in_study` = English, not spam, not a duplicate, live. Rules in `config/normalize.toml`; every row stores that file's hash.
+- [x] Language filter (English): Lingua on the prose, declared tag as fallback (claims M10)
+- [x] Exact and near-duplicate removal: exact at any time, MinHash within 7 days, only against earlier posts (claims M11)
+- [x] Cashtag, ticker and contract-address extraction: cashtags, hashtags, BTC/ETH from an alias lexicon, EVM/Bitcoin/Solana addresses with checksum or length validation
+- [x] Keyed hash of author IDs, with the secret outside the repo: HMAC-SHA256, key in `~/.config/cryptonlp/pseudonym.key` (Compose secret), key fingerprint on every row (claims M12)
+- [x] Spam rules: seven pattern rules (with `unless` exceptions for warnings) plus tag stuffing (more than 6 cashtags or 15 hashtags)
+- [x] Deletions at the source remove the normalized row at once (trigger on `raw.deletions`)
+- [x] Grafana: backlog, posts kept, filter rates, spam rules; alert when a post waits more than 2 hours
+- [ ] **Check:** sample reviewed by hand: `cryptonlp normalize sample` writes 30 posts per decision group to `data/review/`; mark `correct`, then log the result with `cryptonlp ledger intervene --stage 2 --type approval --checkpoint --reason "<error rate per group>"`. Adjust `config/normalize.toml` and `cryptonlp normalize rebuild --yes` if a rule is wrong
 
 ### Step 3b. Thin end-to-end loop
-- [ ] `StubClassifier` (rules or VADER) behind the same interface SemIf will use, writing `model_version = "stub"`
-- [ ] Hourly features from stub labels, with the leakage rule applied
-- [ ] Baseline forecaster ("yesterday's volatility") behind the same interface as arms 1–3
-- [ ] Hourly Prefect flow: classify new posts, compute features, write forecasts to the ledger before the bar opens, score them when it closes
-- [ ] Simulated clock for tests, against the test database only
-- [ ] CI test: replay the frozen day through the whole loop and check the expected forecasts and scores
-- [ ] Grafana panels: forecasts on time vs. late, scored vs. pending
-- [ ] **Check:** smoke run 1, 24 hours live with `phase = development` and no missed bars
+`cryptonlp loop run` / `loop simulate` (`src/cryptonlp/forecast/loop.py`), settings in `config/loop.toml`. Runs at minute 25 and forecasts the next bar, about 35 minutes before the deadline. Scheduled only while `CRYPTONLP_FORECAST_LOOP=true` (ledger rows are permanent).
+- [x] `StubClassifier` (VADER for sentiment, keyword rules for topic, scam and event) behind the `Classifier` interface SemIf will use, writing `model_version = "stub"` to `clean.labels` (`db/init/005_loop.sql`)
+- [x] Hourly features from stub labels, with the leakage rule applied: only posts received during the bar, written once the bar is final (closed 20 minutes, every post normalized and labeled), checked in `HourlyFeatures` and again in `features.hourly`
+- [x] Baseline forecaster ("yesterday's volatility": RMS of the last 24 closed hourly RVs, RV as in claims M4) behind the `Forecaster` interface arms 1–3 will use; `ForecastRequest` refuses data from bars still open
+- [x] Hourly Prefect flow: classify new posts, compute features, write forecasts to the ledger before the bar opens, score them when it closes (squared error on the variance and QLIKE, with the candle files' hashes)
+- [x] Simulated clock for tests, against the test database only: every step reads `ledger.clock()`, and `loop simulate` steps it hour by hour
+- [ ] CI test: replay the frozen day through the whole loop and check the expected forecasts and scores (`tests/test_loop.py` runs a synthetic day built in the test and checks forecasts, scores and features against values computed independently; the frozen real day waits for the replay recording in step 1)
+- [x] Grafana panels: forecasts on time vs. late, missed bars, scored vs. pending, posts per bar in the features; alert for a missed or late bar in the pilot and confirmatory phases
+- [ ] **Check:** smoke run 1, 24 hours live with `phase = development` and no missed bars: set `CRYPTONLP_FORECAST_LOOP=true`, `docker compose --profile collect up -d`, watch "Bars missed, last 24 hours" stay at 0, then set it back to false
 
 ### Step 4. Labeling
-- [ ] Labeling manual written and registered in the ledger
-- [ ] Argilla or Label Studio set up with the five tasks
-- [ ] 2,000 posts sampled: stratified by platform and week, enriched with scam candidates
-- [ ] 2,000 labeled
-- [ ] 200 re-labeled at least 14 days later; Cohen's kappa computed
-- [ ] Time split: oldest 500 for calibration, newest 1,500 for the test
-- [ ] **Check:** labeled set and holdout accepted
+`cryptonlp labeling ...` (`src/cryptonlp/labeling/`), settings in `config/labeling.toml`, tables in schema `labeling` (`db/init/006_labeling.sql`). Decided 3 Nov 2026: Label Studio 1.23.2; one batch of 500 a day from the previous UTC day (so the strata are days, not weeks); platforms in proportion to volume.
+- [ ] Labeling manual written and registered in the ledger (draft: `src/cryptonlp/labeling/manual.md`, review it, then `cryptonlp ledger register-document ... --kind labeling_manual`)
+- [x] Label Studio set up with the five tasks (Compose service `label-studio`, profile `collect`, own database; interface generated from `labeling/tasks.py`; tested against 1.23.2). Deploy: `docker compose --profile collect up -d`, then a personal access token in `.env`
+- [x] Sampling: daily batches stratified by platform and by scam/promotion candidates (10%), strata N and n recorded, seed recorded (`labeling draw`)
+- [ ] 2,000 labeled (`labeling draw` each day, `labeling pull` after each session; hourly sync in the scheduler)
+- [ ] 200 re-labeled at least 14 days later (`labeling relabel`); Cohen's kappa computed (`labeling agreement`)
+- [ ] Time split: oldest 500 for calibration, newest 1,500 for the test (`labeling freeze`, once)
+- [ ] **Check:** labeled set and holdout accepted (stage 3 approval: `cryptonlp ledger intervene --stage 3 --type approval --checkpoint`)
 
 ### Step 5. Statistics arm
-- [ ] Hourly UTC bars; realized volatility from 1-minute returns
-- [ ] Leakage rule and a test that fails if it's broken
-- [ ] Walk-forward harness
-- [ ] GARCH family, HAR, historical VaR, "yesterday's volatility" baseline
-- [ ] MSE, QLIKE, Kupiec, Christoffersen, Diebold-Mariano with Newey-West
-- [ ] Runs logged in MLflow
-- [ ] Arm 1 swapped into the thin loop in place of the baseline
-- [ ] **Check:** arm 1 runs walk-forward on development data, and the CI replay passes with arm 1
+`src/cryptonlp/forecast/arm1/` (models), `forecast/walkforward.py`, `forecast/evaluation.py`; settings in `config/loop.toml` (`[arm1]`, `[walkforward]`). Run `cryptonlp arm1 walkforward`. MLflow is the Compose service `mlflow` (http://127.0.0.1:5000). Method choices are in `paper/claims.md` M17–M20.
+- [x] Hourly UTC bars; realized volatility from 1-minute returns (`features.bars.load_hourly`: return, RV and volume for a whole range at once, checked against the per-bar code the scores use)
+- [x] Leakage rule and a test that fails if it's broken: the forecast for bar t uses bars up to t-2 (claims M14); `tests/test_arm1.py` changes everything from t-1 onwards and checks that no model's forecast moves, and that changing t-2 does move it. `ForecastRequest` also refuses returns of open bars
+- [x] Walk-forward harness: weekly blocks (Monday 00:00 UTC), expanding window from 1 Nov 2024 ending 2 hours before the block, no shuffling; the same `fit` and `predict` the loop calls
+- [x] GARCH family, HAR, historical VaR, "yesterday's volatility" baseline: GARCH(1,1), GJR-GARCH(1,1), EGARCH(1,1) (estimated with `arch`, filtered and forecast two steps ahead in own code, checked against `arch`), HAR as in Equation 5 plus a log-HAR variant, historical VaR (720 hours). VaR 1% and 5% and the large-move probability from each volatility forecast by filtered historical simulation (claims M18)
+- [x] MSE, QLIKE, Kupiec, Christoffersen, Diebold-Mariano with Newey-West (HLN-corrected), plus Clark-West for H1 and the Brier score with Murphy's decomposition
+- [x] Runs logged in MLflow: config as parameters, every metric and DM comparison, forecasts, fits and the data manifest as artifacts; tables also under `data/walkforward/<run ID>/`
+- [x] Arm 1 swapped into the thin loop next to the baseline (the baseline stays: every arm must beat it). Each weekly fit is appended to the ledger as an experiment package that cites a manifest of the raw files read (`data/ledger/manifests/`); every arm 1 forecast points at its package; VaR and large-move forecasts are scored too
+- [ ] **Check:** arm 1 runs walk-forward on development data, and the CI replay passes with arm 1. Walk-forward done 3 Nov 2026 (run `20261103T223017Z-b668b1603cf2-dirty`, claims M20): the log-HAR beats the baseline on QLIKE for BTC and ETH, EGARCH on BTC, GARCH and GJR match it. `tests/test_arm1.py` runs arm 1 through the loop across a block boundary on synthetic candles and recomputes every forecast offline; the frozen real day waits for the replay recording (step 1)
+- To deploy: rebuild the app image, which now needs the statistics stack (`docker compose --profile collect up -d --build`), and start MLflow (`docker compose up -d mlflow`). Until the rebuild, only the forecast loop needs the new packages; every other job imports without them
 
 ### Step 6. Classifier
 - [ ] vLLM serving the SemIf base model with a pinned revision (llama.cpp if Blackwell support fails)

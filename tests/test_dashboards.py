@@ -59,7 +59,14 @@ def test_dashboard_is_well_formed() -> None:
 
 def test_required_alerts_exist() -> None:
     rules = {r["uid"]: r for r in _alert_rules()}
-    assert {"bluesky-lag", "job-failed", "source-silent", "ledger-check"} <= set(rules)
+    assert {
+        "bluesky-lag",
+        "job-failed",
+        "source-silent",
+        "ledger-check",
+        "normalize-backlog",
+        "forecast-missed",
+    } <= set(rules)
     lag = rules["bluesky-lag"]
     threshold = next(q for q in lag["data"] if q["refId"] == lag["condition"])
     assert threshold["model"]["conditions"][0]["evaluator"] == {"type": "gt", "params": [1]}
@@ -81,6 +88,7 @@ def test_grafana_reader_cannot_see_raw_data_or_write(db: psycopg.Connection) -> 
         "SELECT * FROM ops.job_runs",
         "SELECT * FROM ledger.interventions",
         "SELECT * FROM ledger.entries",
+        "SELECT * FROM clean.posts",
         "DELETE FROM ops.collector_state",
     ):
         with (

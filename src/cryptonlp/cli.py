@@ -14,9 +14,10 @@ import logging
 import signal
 import sys
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+from dataclasses import asdict
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 
@@ -24,12 +25,33 @@ from cryptonlp import db, ledger, ops
 from cryptonlp.collectors import binance, bluesky, deletions, mastodon, replay, trends
 from cryptonlp.collectors.common import Recorder, WatchFilter, http_client
 from cryptonlp.config import CollectorsConfig, load_config
+from cryptonlp.forecast.config import load_loop_config
+from cryptonlp.labeling import agreement as labeling_agreement
+from cryptonlp.labeling import sample as labeling_sample
+from cryptonlp.labeling import store as labeling_store
+from cryptonlp.labeling.config import load_labeling_config
+from cryptonlp.labeling.studio import Studio, StudioError
+from cryptonlp.labeling.tasks import label_config
 from cryptonlp.ledger import check as ledger_check
+from cryptonlp.normalize import review
+from cryptonlp.normalize.config import load_normalize_config
+from cryptonlp.normalize.pipeline import Normalizer
+from cryptonlp.normalize.pseudonym import PseudonymKeyError, generate_key, load_key
 from cryptonlp.rawstore import RawStore
 from cryptonlp.run_id import new_run_id
-from cryptonlp.schemas.common import Phase
-from cryptonlp.schemas.ledger import Document, DocumentKind, Intervention, InterventionType
+from cryptonlp.schemas.common import Asset, Phase
+from cryptonlp.schemas.ledger import (
+    DataFile,
+    Document,
+    DocumentKind,
+    Intervention,
+    InterventionType,
+)
 from cryptonlp.settings import REPO_ROOT, Settings
+from cryptonlp.stubs import STUB_VERSION, StubClassifier
+
+if TYPE_CHECKING:
+    from cryptonlp.forecast.loop import HourlyLoop, LoopStats
 
 log = logging.getLogger("cryptonlp")
 
@@ -191,6 +213,74 @@ def job_ledger_anchor(conn: psycopg.Connection, ctx: Context) -> dict[str, Any]:
     return {"head_seq": anchor.head_seq, "head_hash": anchor.head_hash, "path": str(path)}
 
 
+def normalize_job(
+    *, rebuild: bool = False, max_batches: int | None = None
+) -> Callable[[psycopg.Connection, Context], dict[str, Any]]:
+    """Normalize every pending raw post; with ``rebuild``, start again from an empty store."""
+
+    def job(conn: psycopg.Connection, ctx: Context) -> dict[str, Any]:
+        key = load_key(ctx.settings.pseudonym_key_file)
+        normalizer = Normalizer(load_normalize_config(), key, ctx.store, ctx.run_id)
+        if rebuild:
+            # Stub labels are thrown away with the posts. Any other labels (a real classifier,
+            # the human passes) make this refuse; so will vectors, once they refer to these rows.
+            row = conn.execute(
+                "SELECT count(*) FROM clean.labels WHERE model_version <> %s", (STUB_VERSION,)
+            ).fetchone()
+            if row and row[0]:
+                raise RuntimeError(
+                    f"clean.labels holds {row[0]} labels besides the stub's: not rebuilding"
+                )
+            conn.execute("TRUNCATE clean.labels, clean.minhash, clean.posts")
+        return asdict(normalizer.run(conn, max_batches=max_batches))
+
+    return job
+
+
+# The forecast modules need the statistics stack (pandas, arch), imported only by the jobs and
+# commands that forecast, so every other scheduled job keeps running on an older image.
+def _loop(ctx: Context) -> HourlyLoop:
+    from cryptonlp.forecast.loop import HourlyLoop
+
+    return HourlyLoop.default(
+        load_loop_config(ctx.settings.loop_config_path),
+        StubClassifier(),
+        ctx.store,
+        phase=ctx.settings.phase,
+        run_id=ctx.run_id,
+    )
+
+
+def _loop_result(stats: LoopStats) -> dict[str, Any]:
+    from cryptonlp.forecast.loop import LoopError
+
+    if stats.errors:
+        print(json.dumps(stats.as_dict(), default=str), flush=True)
+        raise LoopError(stats)
+    return stats.as_dict()
+
+
+def job_forecast_loop(conn: psycopg.Connection, ctx: Context) -> dict[str, Any]:
+    return _loop_result(_loop(ctx).run(conn))
+
+
+def _studio(settings: Settings) -> Studio:
+    url = (
+        settings.label_studio_url or load_labeling_config(settings.labeling_config_path).studio.url
+    )
+    return Studio(url, settings.label_studio_api_key)
+
+
+def job_labeling_sync(conn: psycopg.Connection, ctx: Context) -> dict[str, Any]:
+    """Copy annotations out of Label Studio, and delete there the posts deleted at the source."""
+    with _studio(ctx.settings) as studio:
+        deleted = labeling_store.sync_deletions(conn, studio)
+        stats = labeling_store.pull(
+            conn, studio, now=ledger.database_clock(conn), run_id=ctx.run_id
+        )
+    return {**asdict(stats), "studio_tasks_deleted": deleted}
+
+
 JOBS: dict[str, Callable[[psycopg.Connection, Context], dict[str, Any]]] = {
     "collect_bluesky": job_bluesky,
     "collect_mastodon": job_mastodon,
@@ -199,8 +289,11 @@ JOBS: dict[str, Callable[[psycopg.Connection, Context], dict[str, Any]]] = {
     "deletion_sync": job_deletion_sync,
     "rawstore_verify": job_rawstore_verify,
     "rawstore_reindex": job_rawstore_reindex,
+    "normalize": normalize_job(),
     "ledger_check": ledger_check_job(),
     "ledger_anchor": job_ledger_anchor,
+    "forecast_loop": job_forecast_loop,
+    "labeling_sync": job_labeling_sync,
 }
 
 
@@ -221,6 +314,10 @@ def cmd_db_init(args: argparse.Namespace) -> None:
     with conn:
         applied = db.apply_init_sql(conn)
         db.set_grafana_password(conn, settings.grafana_db_password)
+        if not args.test:
+            created = db.ensure_label_studio_database(conn, settings.label_studio_db_password)
+            if created:
+                print(f"created database {db.LABEL_STUDIO_DB} for Label Studio")
     print(f"applied {', '.join(applied)} to {'test' if args.test else 'main'} database")
 
 
@@ -323,6 +420,228 @@ def cmd_ledger_register_document(args: argparse.Namespace) -> None:
     print(f"content SHA-256 {record.content_sha256}")
 
 
+def cmd_keygen(args: argparse.Namespace) -> None:
+    path = Path(args.path) if args.path else Settings().pseudonym_key_file
+    key = generate_key(path)
+    print(f"wrote a new pseudonymization key to {path} (key ID {key.key_id})")
+    print("Back it up outside the repository: a lost key gives every author a new hash.")
+
+
+def cmd_normalize_run(args: argparse.Namespace) -> None:
+    run_job("normalize", normalize_job(max_batches=args.max_batches), args)
+
+
+def cmd_normalize_rebuild(args: argparse.Namespace) -> None:
+    if not args.yes:
+        sys.exit("rebuild empties clean.posts and normalizes everything again: pass --yes")
+    run_job("normalize_rebuild", normalize_job(rebuild=True), args, exclusive=True)
+
+
+def cmd_normalize_sample(args: argparse.Namespace) -> None:
+    settings = Settings()
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    default = settings.ledger_path.parent / "review" / f"normalize-sample-{stamp}.csv"
+    path = Path(args.out) if args.out else default
+    with _ledger_conn(args) as conn:
+        rows = review.sample(conn, per_group=args.per_group, seed=args.seed)
+    review.write_csv(rows, path)
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["group"]] = counts.get(r["group"], 0) + 1
+    print(json.dumps({"path": str(path), "rows": len(rows), "per_group": counts}, indent=2))
+    print("The file holds post text: keep it under data/, never commit it.")
+
+
+def cmd_loop_run(args: argparse.Namespace) -> None:
+    if args.test:
+        ctx = Context(args)
+        print(f"run ID {ctx.run_id}", flush=True)
+        with _connect_test() as conn:
+            db.apply_init_sql(conn)
+            stats = _loop_result(_loop(ctx).run(conn))
+        print(json.dumps(stats, default=str), flush=True)
+        return
+    if not args.yes:
+        sys.exit(
+            "this writes forecasts and scores to the main ledger, where they stay for good "
+            f"(phase {Settings().phase.value}): pass --yes, or --test for the test database"
+        )
+    run_job("forecast_loop", job_forecast_loop, args)
+
+
+def cmd_loop_simulate(args: argparse.Namespace) -> None:
+    start = datetime.fromisoformat(args.start)
+    end = datetime.fromisoformat(args.end)
+    if start.tzinfo is None or end.tzinfo is None:
+        sys.exit("give times with a UTC offset, e.g. 2026-11-05T00:00Z")
+    ctx = Context(args)
+    ctx.store = RawStore(Path(args.raw_dir))
+    print(f"run ID {ctx.run_id}", flush=True)
+    with _connect_test() as conn:
+        db.apply_init_sql(conn)
+        from cryptonlp.forecast.loop import simulate
+
+        runs = simulate(conn, _loop(ctx), start, end, minute=args.minute)
+    for stats in runs:
+        print(json.dumps(stats.as_dict(), default=str), flush=True)
+    failed = [s for s in runs if s.errors]
+    if failed:
+        sys.exit(f"{len(failed)} of {len(runs)} hourly runs had failing steps")
+
+
+def cmd_arm1_walkforward(args: argparse.Namespace) -> None:
+    """Walk-forward test of arm 1 and the baseline on development data (read-only)."""
+    import pandas as pd
+
+    from cryptonlp.features import bars
+    from cryptonlp.forecast import walkforward
+
+    settings = Settings()
+    config = load_loop_config(settings.loop_config_path)
+    if args.end:
+        end = datetime.fromisoformat(args.end)
+        if end.tzinfo is None:
+            sys.exit("give --end with a UTC offset, e.g. 2026-11-02T00:00Z")
+        config = config.model_copy(
+            update={"walkforward": config.walkforward.model_copy(update={"end": end})}
+        )
+    store = RawStore(settings.raw_path)
+    run_id = new_run_id()
+    print(f"run ID {run_id}", flush=True)
+    out = settings.walkforward_path / run_id
+    results: list[walkforward.WalkForwardResult] = []
+    files: list[DataFile] = []
+    with _connect_test() if args.test else _connect_main() as conn:
+        now = ledger.database_clock(conn)
+        last = config.walkforward.end or now.replace(minute=0, second=0, microsecond=0)
+        for name in args.asset:
+            asset = Asset(name)
+            hourly = bars.load_hourly(conn, store, asset, config.arm1.train_start, last, now=now)
+            have = int(hourly.frame["ret"].notna().sum())
+            print(
+                f"{asset.value}: {have} hourly bars with data, {len(hourly.files)} files",
+                flush=True,
+            )
+            result = walkforward.run(hourly.frame, asset, config)
+            results.append(result)
+            files += hourly.files
+            out.mkdir(parents=True, exist_ok=True)
+            result.metrics.to_csv(out / f"{asset.value}-metrics.csv", index=False)
+            result.comparisons.to_csv(out / f"{asset.value}-comparisons.csv", index=False)
+            result.forecasts.to_parquet(out / f"{asset.value}-forecasts.parquet", index=False)
+            with pd.option_context("display.width", 160, "display.max_columns", 20):
+                print(walkforward.summary(result).to_string(index=False), flush=True)
+    print(f"tables in {out}", flush=True)
+    if args.no_mlflow:
+        return
+    uri = args.tracking_uri or settings.mlflow_tracking_uri
+    local = None if uri.startswith(("http://", "https://")) else settings.walkforward_path
+    mlflow_run = walkforward.log_to_mlflow(
+        results,
+        config,
+        run_id=run_id,
+        data_files=files,
+        tracking_uri=uri,
+        artifact_location=(local / "mlflow-artifacts").as_uri() if local else None,
+    )
+    print(f"MLflow run {mlflow_run} at {uri}", flush=True)
+
+
+def _draw_and_push(args: argparse.Namespace, draw: Callable[..., labeling_sample.Batch]) -> None:
+    settings = Settings()
+    config = load_labeling_config(settings.labeling_config_path)
+    run_id = new_run_id()
+    print(f"run ID {run_id}", flush=True)
+    with _ledger_conn(args) as conn:
+        batch = draw(conn, config, now=ledger.database_clock(conn), run_id=run_id)
+        print(labeling_sample.describe(batch), flush=True)
+        if args.no_push:
+            print(f"not pushed: run `cryptonlp labeling push {batch.batch_id}`")
+            return
+        with _studio(settings) as studio:
+            project = labeling_store.push(
+                conn, studio, batch.batch_id, prefix="TEST " if args.test else ""
+            )
+    print(f"Label Studio project {project}: {config.studio.url}/projects/{project}")
+
+
+def cmd_labeling_draw(args: argparse.Namespace) -> None:
+    day = date.fromisoformat(args.day) if args.day else None
+
+    def draw(conn: psycopg.Connection, config: Any, *, now: datetime, run_id: str) -> Any:
+        the_day = day or (now - timedelta(days=1)).date()
+        return labeling_sample.draw_pass1(
+            conn, config, the_day, now=now, run_id=run_id, size=args.size, seed=args.seed
+        )
+
+    _draw_and_push(args, draw)
+
+
+def cmd_labeling_relabel(args: argparse.Namespace) -> None:
+    def draw(conn: psycopg.Connection, config: Any, *, now: datetime, run_id: str) -> Any:
+        return labeling_sample.draw_relabel(conn, config, now=now, run_id=run_id, seed=args.seed)
+
+    _draw_and_push(args, draw)
+
+
+def cmd_labeling_push(args: argparse.Namespace) -> None:
+    settings = Settings()
+    with _ledger_conn(args) as conn, _studio(settings) as studio:
+        project = labeling_store.push(conn, studio, args.batch, prefix="TEST " if args.test else "")
+    print(f"Label Studio project {project}")
+
+
+def cmd_labeling_status(args: argparse.Namespace) -> None:
+    config = load_labeling_config(Settings().labeling_config_path)
+    with _ledger_conn(args) as conn:
+        report = labeling_store.status(conn, config, ledger.database_clock(conn))
+        invalid = conn.execute(
+            "SELECT c.item_id, i.batch_id, i.position, c.error FROM labeling.current c "
+            "JOIN labeling.items i USING (item_id) WHERE c.error IS NOT NULL "
+            "AND c.error <> %s ORDER BY 2, 3",
+            (labeling_store.DELETED_IN_STUDIO,),
+        ).fetchall()
+    report["invalid_annotations"] = [
+        {"item_id": r[0], "batch_id": r[1], "position": r[2], "error": r[3]} for r in invalid
+    ]
+    print(json.dumps(report, indent=2, default=str))
+
+
+def cmd_labeling_agreement(args: argparse.Namespace) -> None:
+    settings = Settings()
+    config = load_labeling_config(settings.labeling_config_path)
+    run_id = new_run_id()
+    with _ledger_conn(args) as conn:
+        report = labeling_agreement.agreement(conn, config.relabel.min_gap)
+    report["run_id"] = run_id
+    out = settings.labeling_path / f"agreement-{run_id}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2, default=str) + "\n")
+    print(json.dumps(report, indent=2, default=str))
+    print(f"written to {out}")
+
+
+def cmd_labeling_freeze(args: argparse.Namespace) -> None:
+    settings = Settings()
+    config = load_labeling_config(settings.labeling_config_path)
+    run_id = new_run_id()
+    print(f"run ID {run_id}", flush=True)
+    with _ledger_conn(args) as conn:
+        if args.relabel:
+            n = labeling_store.freeze_relabel(conn, run_id=run_id)
+            print(f"wrote the re-labeling of {n} posts to clean.labels (human:relabel)")
+            return
+        frozen = labeling_store.freeze(
+            conn, config, settings.labeling_path, run_id=run_id, allow_short=args.allow_short
+        )
+    print(json.dumps(asdict(frozen), indent=2, default=str))
+    print(
+        "The manifest holds post URIs: keep it under data/. Cite its SHA-256 in the H4 "
+        "experiment package, and log the stage 3 approval with `cryptonlp ledger intervene "
+        "--stage 3 --type approval --checkpoint --reason ...`."
+    )
+
+
 def cmd_serve(args: argparse.Namespace) -> None:
     from cryptonlp.flows.collect import serve
 
@@ -382,6 +701,48 @@ def _add_ledger_parser(sub: Any) -> None:
     q.set_defaults(func=cmd_ledger_register_document)
 
 
+def _add_labeling_parser(sub: Any) -> None:
+    p = sub.add_parser("labeling", help="the human-labeled set (step 4)")
+    l_sub = p.add_subparsers(dest="action", required=True)
+
+    def with_test(q: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        q.add_argument("--test", action="store_true", help="the test database instead")
+        return q
+
+    q = with_test(l_sub.add_parser("draw", help="draw a first-pass batch and push it"))
+    q.add_argument("--day", help="UTC day to draw from, YYYY-MM-DD (default yesterday)")
+    q.add_argument("--size", type=int, help="batch size (required for a top-up of a drawn day)")
+    q.add_argument("--seed", type=int, help="default: a fresh random seed, recorded")
+    q.add_argument("--no-push", action="store_true", help="draw only")
+    q.set_defaults(func=cmd_labeling_draw)
+
+    q = with_test(l_sub.add_parser("relabel", help="draw the blind re-labeling batch and push it"))
+    q.add_argument("--seed", type=int, help="default: a fresh random seed, recorded")
+    q.add_argument("--no-push", action="store_true", help="draw only")
+    q.set_defaults(func=cmd_labeling_relabel)
+
+    q = with_test(l_sub.add_parser("push", help="push a drawn batch to Label Studio"))
+    q.add_argument("batch", type=int)
+    q.set_defaults(func=cmd_labeling_push)
+
+    q = l_sub.add_parser("pull", help="copy annotations from Label Studio (also hourly)")
+    q.set_defaults(func=lambda a: run_job("labeling_sync", job_labeling_sync, a))
+
+    q = with_test(l_sub.add_parser("status", help="progress, labeling rate, invalid annotations"))
+    q.set_defaults(func=cmd_labeling_status)
+
+    q = with_test(l_sub.add_parser("agreement", help="intra-annotator kappa (re-labeling)"))
+    q.set_defaults(func=cmd_labeling_agreement)
+
+    q = with_test(l_sub.add_parser("freeze", help="fix the split and write the human labels"))
+    q.add_argument("--relabel", action="store_true", help="write the re-labeling pass instead")
+    q.add_argument("--allow-short", action="store_true", help="freeze below the target")
+    q.set_defaults(func=cmd_labeling_freeze)
+
+    q = l_sub.add_parser("interface", help="print the Label Studio labeling interface (XML)")
+    q.set_defaults(func=lambda a: print(label_config(), end=""))
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -425,11 +786,72 @@ def main(argv: list[str] | None = None) -> None:
 
     _add_ledger_parser(sub)
 
+    p = sub.add_parser("keygen", help="create the pseudonymization key (once, outside the repo)")
+    p.add_argument("--path", help="default CRYPTONLP_PSEUDONYM_KEY_FILE")
+    p.set_defaults(func=cmd_keygen)
+
+    p = sub.add_parser("normalize", help="language, dedupe, entities, spam, pseudonymization")
+    n_sub = p.add_subparsers(dest="action", required=True)
+    q = n_sub.add_parser("run", help="normalize every pending raw post (also every 10 minutes)")
+    q.add_argument("--max-batches", type=int, help="stop after N batches of 5,000 posts")
+    q.set_defaults(func=cmd_normalize_run)
+    q = n_sub.add_parser("rebuild", help="empty clean.posts and normalize everything again")
+    q.add_argument("--yes", action="store_true")
+    q.set_defaults(func=cmd_normalize_rebuild)
+    q = n_sub.add_parser("sample", help="CSV of decisions for the hand review")
+    q.add_argument("--per-group", type=int, default=30)
+    q.add_argument("--seed", default="1")
+    q.add_argument("--out", help="default data/review/normalize-sample-<time>.csv")
+    q.add_argument("--test", action="store_true", help="the test database instead")
+    q.set_defaults(func=cmd_normalize_sample)
+
+    p = sub.add_parser("loop", help="the hourly forecast loop (step 3b)")
+    lp_sub = p.add_subparsers(dest="action", required=True)
+    q = lp_sub.add_parser("run", help="one cycle: classify, features, forecast, score")
+    q.add_argument("--test", action="store_true", help="the test database instead")
+    q.add_argument("--yes", action="store_true", help="write to the main ledger")
+    q.set_defaults(func=cmd_loop_run)
+    q = lp_sub.add_parser(
+        "simulate", help="run the loop hour by hour on a simulated clock (test database)"
+    )
+    q.add_argument("start", help="ISO time with offset, e.g. 2026-11-05T00:00Z")
+    q.add_argument("end", help="ISO time with offset")
+    q.add_argument("--minute", type=int, default=25, help="minute past the hour (default 25)")
+    q.add_argument(
+        "--raw-dir",
+        default=str(REPO_ROOT / "data" / "replay-store"),
+        help="raw store the replay wrote to (default data/replay-store)",
+    )
+    q.set_defaults(func=cmd_loop_simulate)
+
+    p = sub.add_parser("arm1", help="arm 1, statistics only (step 5)")
+    a_sub = p.add_subparsers(dest="action", required=True)
+    q = a_sub.add_parser(
+        "walkforward", help="walk-forward test of arm 1 and the baseline (development data)"
+    )
+    q.add_argument("--asset", nargs="+", default=["BTC", "ETH"], choices=["BTC", "ETH"])
+    q.add_argument("--end", help="last bar to test, exclusive (ISO time with offset)")
+    q.add_argument(
+        "--tracking-uri", help="MLflow tracking URI (default CRYPTONLP_MLFLOW_TRACKING_URI)"
+    )
+    q.add_argument("--no-mlflow", action="store_true", help="only write the tables under data/")
+    q.add_argument("--test", action="store_true", help="read candles from the test database")
+    q.set_defaults(func=cmd_arm1_walkforward)
+
+    _add_labeling_parser(sub)
+
     p = sub.add_parser("serve", help="run the scheduled jobs with Prefect")
     p.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)
     try:
         args.func(args)
-    except (db.DatabaseGuardError, ledger.LedgerError) as exc:
+    except (
+        db.DatabaseGuardError,
+        ledger.LedgerError,
+        PseudonymKeyError,
+        labeling_sample.DrawError,
+        labeling_store.FreezeError,
+        StudioError,
+    ) as exc:
         sys.exit(f"error: {exc}")

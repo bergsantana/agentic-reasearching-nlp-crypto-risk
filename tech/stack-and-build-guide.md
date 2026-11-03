@@ -13,7 +13,7 @@ The method rules still apply. Where this guide and the paper disagree, the paper
 | Language and packaging | Python 3, uv, Docker Compose |
 | Data | Parquet raw store, PostgreSQL + pgvector, Prefect |
 | Ledger | PostgreSQL (append-only, hash-chained, deadline enforced by the database clock) |
-| Labeling | Argilla or Label Studio |
+| Labeling | Label Studio (chosen 3 Nov 2026) |
 | Models | vLLM serving SemIf; Hugging Face Transformers baselines; MLflow tracking and registry |
 | Statistics | `arch`, statsmodels, scikit-learn, LightGBM |
 | Agents | LangGraph, MCP tool servers, Pydantic, Langfuse |
@@ -48,7 +48,7 @@ The method rules still apply. Where this guide and the paper disagree, the paper
 | **Argilla** or **Label Studio** | Labeling the 2,000 posts, the re-labeling of 200, and the Curator's review queue | Both self-host, export to Hugging Face datasets and support multi-label tasks. Argilla is closer to the Hugging Face ecosystem. | Data-centric ML |
 | **vLLM** | Serves SemIf's base model (Qwen3.5-4B) and, optionally, a local agent model | Serving models is a core MLOps skill, and vLLM is the common choice. llama.cpp is the fallback if vLLM doesn't support the GPU (see "Hardware notes"). | Model serving |
 | **Hugging Face Transformers** | CryptoBERT, FinBERT and the fallback fine-tuning; VADER via its own package | The baselines in H4 are published on Hugging Face | Standard |
-| **MLflow** | Logs every classifier and forecasting run; registry with model versions and rollback | The design stores a model version beside every label and retrains only when the holdout beats the live model, which is exactly what a registry does | The default MLOps tool |
+| **MLflow** (Compose service from step 5) | Logs every classifier and forecasting run; registry with model versions and rollback | The design stores a model version beside every label and retrains only when the holdout beats the live model, which is exactly what a registry does | The default MLOps tool |
 
 ### Statistics and forecasting
 
@@ -216,6 +216,8 @@ Connect the thinnest possible version of the whole hourly cycle now, with stand-
 
 **Done when** arm 1 runs walk-forward on development data and beats or matches the baseline, and the CI replay passes with arm 1.
 
+**As built (3 Nov 2026):** the forecast for bar t is issued at minute 25 of bar t-1, so every model forecasts two bars past its newest data, in the harness exactly as in the loop. Models are re-estimated weekly; in the loop, each weekly fit becomes a ledger experiment package that the week's forecasts cite. MLflow runs as its own Compose service with a SQLite store (the official image has no Postgres driver). The model list, tails and tests are in `paper/claims.md` M17–M19.
+
 ### Step 6. Classifier serving and bake-off
 
 - Serve the SemIf base model on vLLM, with the revision pinned.
@@ -350,7 +352,7 @@ Backfilled posts are kept out of the study for three reasons:
 
 ## Still to decide
 
-- Argilla or Label Studio.
+- ~~Argilla or Label Studio.~~ Label Studio (3 Nov 2026): one container with its database in the existing Postgres; Argilla needs Elasticsearch and Redis, and its last release was about a year old.
 - Which hosted model drives the agents, and the monthly spend cap.
 - Which Mastodon instances to poll.
 - Whether exploratory hypotheses enter the ledger without the researcher's approval (open in the article, Section 4.2).

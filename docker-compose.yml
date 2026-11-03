@@ -2,7 +2,10 @@ name: cryptonlp
 
 # Services are added as each build step needs them (see tech/build-plan.md).
 # Step 0: Postgres + pgvector for real data, and a separate throwaway test database.
-# Step 1: Grafana (default), and the collectors with Prefect (profile "collect"):
+# Step 1: Grafana (default), and the collectors with Prefect (profile "collect").
+# Step 3: normalization runs in the scheduler, with the pseudonymization key as a secret.
+# Step 4: Label Studio (profile "collect"), with its own database on the main server.
+# Step 5: MLflow (default), for the walk-forward runs; the classifier registry joins it in step 6.
 #   docker compose up -d --wait                    databases and Grafana
 #   docker compose --profile collect up -d --build  also start collecting into the main database
 
@@ -19,6 +22,8 @@ x-app: &app
     CRYPTONLP_DATABASE_URL: postgresql://${POSTGRES_USER:-cryptonlp}:${POSTGRES_PASSWORD:-cryptonlp}@postgres:5432/cryptonlp
     CRYPTONLP_GRAFANA_DB_PASSWORD: ${CRYPTONLP_GRAFANA_DB_PASSWORD:-grafana}
     CRYPTONLP_RECORD_REPLAY: ${CRYPTONLP_RECORD_REPLAY:-false}
+    CRYPTONLP_LABEL_STUDIO_DB_PASSWORD: ${CRYPTONLP_LABEL_STUDIO_DB_PASSWORD:-labelstudio}
+    CRYPTONLP_MLFLOW_TRACKING_URI: http://mlflow:5000
     PREFECT_API_URL: http://prefect-server:4200/api
   profiles: ["collect"]
 
@@ -117,10 +122,25 @@ services:
     profiles: ["collect"]
     restart: unless-stopped
 
-  # Runs the scheduled jobs: Mastodon, trends, Binance, deletion sync, raw-store check.
+  # Runs the scheduled jobs: Mastodon, trends, Binance, deletion sync, raw-store check,
+  # ledger check and anchor, normalization, and the forecast loop when CRYPTONLP_FORECAST_LOOP
+  # is true (smoke runs, pilot, confirmatory period).
   scheduler:
     <<: *app
     command: ["serve"]
+    environment:
+      CRYPTONLP_DATABASE_URL: postgresql://${POSTGRES_USER:-cryptonlp}:${POSTGRES_PASSWORD:-cryptonlp}@postgres:5432/cryptonlp
+      CRYPTONLP_GRAFANA_DB_PASSWORD: ${CRYPTONLP_GRAFANA_DB_PASSWORD:-grafana}
+      CRYPTONLP_RECORD_REPLAY: ${CRYPTONLP_RECORD_REPLAY:-false}
+      CRYPTONLP_FORECAST_LOOP: ${CRYPTONLP_FORECAST_LOOP:-false}
+      # The hourly labeling sync runs only when the token is set.
+      CRYPTONLP_LABEL_STUDIO_API_KEY: ${CRYPTONLP_LABEL_STUDIO_API_KEY:-}
+      CRYPTONLP_LABEL_STUDIO_URL: http://label-studio:8080
+      CRYPTONLP_MLFLOW_TRACKING_URI: http://mlflow:5000
+      PREFECT_API_URL: http://prefect-server:4200/api
+      CRYPTONLP_PSEUDONYM_KEY_FILE: /run/secrets/pseudonym_key
+    secrets:
+      - pseudonym_key
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -138,7 +158,70 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
 
+  # Step 4: labeling. Local only. Its state lives in its own database (created by db-init); the
+  # annotations are also copied hourly into labeling.annotations by the scheduler.
+  label-studio:
+    image: heartexlabs/label-studio:1.23.2
+    environment:
+      DJANGO_DB: default
+      POSTGRE_HOST: postgres
+      POSTGRE_PORT: "5432"
+      POSTGRE_NAME: labelstudio
+      POSTGRE_USER: labelstudio
+      POSTGRE_PASSWORD: ${CRYPTONLP_LABEL_STUDIO_DB_PASSWORD:-labelstudio}
+      # The account created on first start; log in with it at http://127.0.0.1:8080.
+      LABEL_STUDIO_USERNAME: ${LABEL_STUDIO_USERNAME:-researcher@localhost}
+      LABEL_STUDIO_PASSWORD: ${LABEL_STUDIO_PASSWORD:-change-me-now}
+      LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK: "true"
+    ports:
+      - "127.0.0.1:${LABEL_STUDIO_PORT:-8080}:8080"
+    volumes:
+      - label-studio-data:/label-studio/data
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    profiles: ["collect"]
+    restart: unless-stopped
+
+  # Step 5: experiment tracking. Walk-forward runs log here (`cryptonlp arm1 walkforward`);
+  # open http://127.0.0.1:5000. Runs and artifacts live in the volume (SQLite: the official
+  # image has no Postgres driver). Development results only: what the study rests on is in the
+  # ledger.
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.17.2
+    command:
+      - mlflow
+      - server
+      - --host=0.0.0.0
+      - --port=5000
+      - --backend-store-uri=sqlite:////mlflow/mlflow.db
+      - --serve-artifacts
+      - --artifacts-destination=/mlflow/artifacts
+      - --allowed-hosts=mlflow:5000,localhost:*,127.0.0.1:*
+    ports:
+      - "127.0.0.1:${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow-data:/mlflow
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5000/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+# The key never enters the repository. Create it once with `uv run cryptonlp keygen`.
+secrets:
+  pseudonym_key:
+    file: ${CRYPTONLP_PSEUDONYM_KEY_HOST_FILE:-${HOME}/.config/cryptonlp/pseudonym.key}
+
 volumes:
   pgdata:
   grafana-data:
   prefect-data:
+  label-studio-data:
+  mlflow-data:

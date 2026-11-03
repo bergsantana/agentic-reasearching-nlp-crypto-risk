@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 from psycopg import sql
@@ -202,6 +202,14 @@ def head(conn: psycopg.Connection) -> Entry | None:
         "JOIN pg_class c ON c.oid = e.tableoid ORDER BY e.seq DESC LIMIT 1"
     ).fetchone()
     return None if row is None else Entry(row[0], row[1], row[2], row[3])
+
+
+def database_clock(conn: psycopg.Connection) -> datetime:
+    """The time the ledger checks deadlines against: the database clock, or this session's
+    simulated time in the test database. Jobs that must agree with the ledger read this."""
+    row = conn.execute("SELECT ledger.clock()").fetchone()
+    assert row is not None
+    return cast(datetime, row[0])
 
 
 def set_simulated_clock(conn: psycopg.Connection, at: datetime | None) -> None:

@@ -140,10 +140,20 @@ def test_bad_run_id_rejected() -> None:
 
 def test_normalized_post_author_must_be_hashed() -> None:
     base: dict[str, Any] = raw_post().model_dump(exclude={"author_id", "langs", "collector_run_id"})
-    ok = NormalizedPost(**base, author_hash="a" * 64, lang="en", normalize_run_id=RUN_ID)
+    extra: dict[str, Any] = {"lang": "en", "lang_method": "detected", "normalize_run_id": RUN_ID}
+    ok = NormalizedPost(**base, author_hash="a" * 64, **extra)
     assert ok.author_hash == "a" * 64
+    assert ok.in_study
     with pytest.raises(ValidationError):
-        NormalizedPost(**base, author_hash="did:plc:abc", lang="en", normalize_run_id=RUN_ID)
+        NormalizedPost(**base, author_hash="did:plc:abc", **extra)
+    with pytest.raises(ValidationError):  # a duplicate names its kind
+        NormalizedPost(**base, author_hash="a" * 64, duplicate_of="at://x", **extra)
+    with pytest.raises(ValidationError):  # spam is spam because a rule matched
+        NormalizedPost(**base, author_hash="a" * 64, is_spam=True, **extra)
+    spam = NormalizedPost(
+        **base, author_hash="a" * 64, is_spam=True, spam_rules=("double_your_coins",), **extra
+    )
+    assert not spam.in_study
 
 
 def test_candle_consistency() -> None:
@@ -196,6 +206,9 @@ def test_multi_label_and_entity_tasks() -> None:
     assert len(entity.values) == 2
     with pytest.raises(ValidationError):
         label(task=Task.ENTITY, values=("BTC",), probabilities={})
+    assert label(task=Task.ENTITY, values=("none",), probabilities={}).values == ("none",)
+    with pytest.raises(ValidationError, match="cannot go with"):
+        label(task=Task.ENTITY, values=("none", "token:ETH"), probabilities={})
 
 
 def test_human_label_needs_no_confidence() -> None:

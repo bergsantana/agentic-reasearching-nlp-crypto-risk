@@ -1,0 +1,64 @@
+# Step 4: the human-labeled set. The sampling plan here is part of the labeling manual
+# (src/cryptonlp/labeling/manual.md, section "Sample and split"): change both together, and
+# never after the manual is registered in the ledger without registering a new version.
+#
+# Every batch stores the SHA-256 of these settings as loaded.
+
+[sample]
+# Posts in the labeled set (first pass), and posts per daily batch: one batch a day, drawn
+# from the previous UTC day, so 2,000 posts take four labeling days.
+target = 2000
+batch_size = 500
+# A day is drawn only once it has ended and this many minutes have passed, so every post
+# received that day is on disk and normalized (Bluesky writes every 10 minutes, normalization
+# runs every 10 minutes).
+settle_minutes = 60
+# Platforms, each allocated in proportion to its in-study volume on the day drawn.
+sources = ["bluesky", "mastodon"]
+
+# Scams are rare, so part of each batch comes from posts that look like scam or promotion
+# candidates. Rule-flagged spam already left the study in normalization (config/normalize.toml),
+# so these are softer signals. Candidates and other posts are separate strata, and every batch
+# records each stratum's population and sample size, so estimates can be re-weighted.
+[enrich]
+# Share of each batch drawn from candidates (fewer if the day has fewer candidates).
+share = 0.10
+# A post with a contract or wallet address is a candidate.
+addresses = true
+# Python regular expressions, case-insensitive: a match on the text makes a candidate.
+patterns = [
+    '\bgiveaways?\b',
+    '\bairdrops?\b',
+    '\bpre-?sales?\b',
+    '\bwhitelist',
+    '\bclaim(ed|ing)?\b',
+    '\b(dm|message|inbox) me\b',
+    '\b(seed|recovery) phrase\b',
+    '\bprivate keys?\b',
+    '\bguarantee(d|s)?\b',
+    '\brisk[- ]free\b',
+    '\bpassive income\b',
+    '\b\d{2,5}x\b',
+    '\bgems?\b',
+    '\btelegram\b|t\.me/',
+    '\bdiscord\.gg\b',
+    '\breferral\b|\buse my (code|link)\b',
+    '\bsign[- ]?up bonus\b',
+    '\bfree (btc|eth|bitcoin|ethereum|crypto|tokens?|nfts?|usdt)\b',
+    '\b(connect|verify|validate|sync) (your )?wallets?\b',
+]
+
+[relabel]
+# Posts labeled a second time, blind to the first labels, to measure intra-annotator agreement.
+size = 200
+# Days between a post's first label (its last edit) and the draw of the re-labeling batch.
+min_gap_days = 14
+
+[split]
+# By time, on the receive time: the oldest posts calibrate the classifiers' probabilities, the
+# rest is the test set (claims M5). Fixed once, by `cryptonlp labeling freeze`.
+calibration = 500
+
+[studio]
+# Label Studio, as the host sees it (the scheduler uses CRYPTONLP_LABEL_STUDIO_URL instead).
+url = "http://127.0.0.1:8080"

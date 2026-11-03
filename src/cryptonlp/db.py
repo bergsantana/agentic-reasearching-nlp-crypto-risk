@@ -71,6 +71,28 @@ def apply_init_sql(conn: psycopg.Connection, sql_dir: Path = INIT_SQL_DIR) -> li
     return applied
 
 
+LABEL_STUDIO_DB = "labelstudio"
+
+
+def ensure_label_studio_database(conn: psycopg.Connection, password: str) -> bool:
+    """Label Studio keeps its own state in its own database and role, on the main server.
+    Creates them when missing and sets the password; True if the database was created.
+    ``conn`` must have no open transaction (CREATE DATABASE runs outside one)."""
+    conn.autocommit = True
+    role = sql.Identifier(LABEL_STUDIO_DB)
+    exists = conn.execute(
+        "SELECT 1 FROM pg_roles WHERE rolname = %s", (LABEL_STUDIO_DB,)
+    ).fetchone()
+    verb = "ALTER" if exists else "CREATE"
+    conn.execute(
+        sql.SQL(verb + " ROLE {} WITH LOGIN PASSWORD {}").format(role, sql.Literal(password))
+    )
+    if conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (LABEL_STUDIO_DB,)).fetchone():
+        return False
+    conn.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(role, role))
+    return True
+
+
 def set_grafana_password(conn: psycopg.Connection, password: str) -> None:
     """Grafana logs in as ``grafana_reader``, which can only read the ``monitoring`` views."""
     conn.execute(

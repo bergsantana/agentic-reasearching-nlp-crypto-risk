@@ -1,0 +1,74 @@
+# Normalization settings (step 3). Read by src/cryptonlp/normalize/config.py; agents get
+# read-only access to config/.
+#
+# Every normalized row stores the SHA-256 of this file as loaded, so a change to a rule is
+# visible in the data. Change rules before the confirmatory period, after the hand review
+# (`cryptonlp normalize sample`), and rebuild (`cryptonlp normalize rebuild`).
+
+[language]
+# The study keeps English only. Detection runs on the text with URLs, @handles, $cashtags,
+# #hashtags, addresses and numbers removed. With fewer letters than this left, the detector
+# is unreliable, and the client's declared language is used instead (or "und").
+min_letters = 15
+# Below this confidence the detector is guessing (on 3 Nov 2026 data: price-ticker bots with
+# hardly any prose, e.g. labeled Welsh at 0.06), so the declared tag is used instead.
+min_confidence = 0.2
+
+[dedupe]
+# Exact duplicates: same text after Unicode NFKC, case folding and whitespace collapsing, at
+# any time. Near duplicates: estimated Jaccard similarity of character shingles at or above
+# `threshold`, among English posts received in the last `window_days`.
+threshold = 0.8
+window_days = 7
+shingle_chars = 5
+num_perm = 64
+bands = 16          # bands x rows must equal num_perm; 16 x 4 finds pairs at 0.8 almost surely
+min_chars = 30      # shorter texts are only checked for exact duplicates
+
+[entities]
+# Asset aliases, whole word and case-insensitive; a leading $ or # is allowed. Maintained by
+# the researcher; the Trend scout can propose additions (paper, Section 4.5).
+[entities.assets]
+BTC = ["bitcoin", "bitcoins", "btc", "xbt", "wbtc", "sats", "satoshis", "lightning network"]
+ETH = ["ethereum", "eth", "ether", "weth", "steth", "erc20", "erc-20", "vitalik"]
+
+[spam]
+# A post with any of these is evident spam and leaves the study. Patterns are Python regular
+# expressions, case-insensitive. `requires_url`: only when the post has a link. `unless`: the
+# rule does not apply when this also matches (warnings use the scammers' words). Keep them
+# conservative: catching scams is the classifier's and the Verifier's job; this only removes
+# what nobody would count as discussion.
+max_cashtags = 6     # more distinct cashtags than this is ticker stuffing
+max_hashtags = 15    # more than this is tag stuffing (Mastodon posts often carry 10+ tags)
+
+[[spam.rules]]
+name = "giveaway_send_receive"
+pattern = '\b(send|deposit|transfer)\b.{0,60}\b(receive|get)\b.{0,30}\b(back|double|2x|twice)\b'
+
+[[spam.rules]]
+name = "double_your_coins"
+pattern = '\bdouble your (btc|eth|bitcoin|ethereum|crypto|coins?|money|investment)\b'
+
+[[spam.rules]]
+name = "claim_with_link"
+pattern = '\bclaim (your |free |now )*(airdrop|reward|rewards|tokens?|eth|btc|usdt|nft)\b'
+requires_url = true
+
+[[spam.rules]]
+name = "wallet_connect_phish"
+pattern = '\b(connect|validate|verify|sync|rectify) (your )?wallets?\b'
+requires_url = true
+unless = '\b(never|don.?t|do not|beware|scam|phishing|warning|fake)\b'
+
+[[spam.rules]]
+name = "seed_phrase_request"
+pattern = '\b(enter|share|send|submit|verify|import) (your )?(seed|recovery|secret|mnemonic) (phrase|words)\b'
+unless = '\b(never|don.?t|do not|won.?t|will not|nobody|no one|beware|scam|warning)\b'
+
+[[spam.rules]]
+name = "guaranteed_returns"
+pattern = '\bguaranteed (profit|profits|returns?|income|gains)\b|\b\d{2,4} ?% (daily|weekly|per day) (profit|returns?|roi)\b'
+
+[[spam.rules]]
+name = "dm_for_profit"
+pattern = '\b(dm|inbox|message|whatsapp|telegram) me\b.{0,60}\b(invest|investment|profit|trading|signals?|account manager|mining)\b'

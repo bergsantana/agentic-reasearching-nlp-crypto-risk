@@ -17,6 +17,8 @@ wheels/
 # Data: raw store and model weights live outside git (hashes go into the ledger)
 data/
 models/
+# MLflow's default artifact folder for local stores (the CLI and tests point elsewhere)
+mlruns/
 
 # Windows download markers and editor locks
 *:Zone.Identifier

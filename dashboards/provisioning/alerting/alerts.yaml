@@ -177,3 +177,88 @@ groups:
             See "Recent chain checks" on the dashboard, or run `cryptonlp ledger check`. A
             break means an entry was changed after it was written: do not repair it in place;
             record what happened as an intervention and report it as a deviation.
+
+  - orgId: 1
+    name: normalization
+    folder: cryptonlp
+    interval: 5m
+    rules:
+      # Normalization runs every 10 minutes. From step 3b the hourly loop classifies only
+      # normalized posts, so a stuck job would silently thin out the features.
+      - uid: normalize-backlog
+        title: Normalization is falling behind
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: cryptonlp-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT coalesce(extract(epoch FROM now() - oldest_pending), 0) / 3600.0
+                       AS oldest_pending_hours
+                FROM monitoring.normalize_backlog
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [2] }
+        noDataState: OK
+        execErrState: Alerting
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: A raw post has waited more than 2 hours for normalization
+          description: >-
+            Check the "normalize" runs in the Prefect UI, or run `cryptonlp normalize run`. A
+            missing pseudonymization key stops the job (see `cryptonlp keygen`).
+
+      # Pilot and confirmatory period only: a bar with no on-time forecast is lost for good.
+      # Development smoke runs are checked on the dashboard instead ("Bars missed").
+      - uid: forecast-missed
+        title: A bar opened without its forecast
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: cryptonlp-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT CASE
+                         WHEN NOT EXISTS (SELECT 1 FROM monitoring.forecast_bars
+                                          WHERE phase IN ('pilot', 'confirmatory')
+                                            AND bar_open > now() - interval '2 days') THEN 0
+                         ELSE (SELECT CASE WHEN coalesce(sum(on_time), 0) = 0 THEN 1 ELSE 0 END
+                                      + coalesce(sum(late), 0)
+                               FROM monitoring.forecast_bars
+                               WHERE phase IN ('pilot', 'confirmatory')
+                                 AND bar_open = date_trunc('hour', now()))
+                       END AS missed_or_late
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: The current bar opened with no forecast in the ledger, or a forecast was late
+          description: >-
+            Check the "forecast-loop" runs in the Prefect UI and that the scheduler is up. A
+            missed or late bar is an interruption: log it with `cryptonlp ledger intervene
+            --stage 5 --type interruption --reason "..."`.

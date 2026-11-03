@@ -1,0 +1,66 @@
+# The hourly forecast loop (step 3b). Agents get read-only access.
+#
+# The loop runs at minute 25 of every hour (src/cryptonlp/flows/collect.py) and forecasts the bar
+# that opens at the next hour, so forecasts reach the ledger about 35 minutes before the deadline.
+
+[loop]
+assets = ["BTC", "ETH"]
+# A bar's features are computed only this long after it closes. Bluesky writes its buffer every
+# 10 minutes (flush_seconds in config/collectors.toml) and normalization runs every 10 minutes,
+# so by then every post received during the bar has been written and normalized. The loop also
+# waits while any of the bar's posts are still unnormalized or unlabeled.
+features_settle_minutes = 20
+# How far back the loop looks for bars still missing features (the first run, or after a pause).
+features_lookback_hours = 48
+# Posts per classifier call.
+classify_batch = 2000
+
+# "Yesterday's volatility": every arm must beat it (design doc, Forecasting arms).
+[baseline]
+# The forecast for the next hour is the root mean square of the realized volatility of the last
+# `window_hours` closed bars.
+window_hours = 24
+# Fewer complete bars than this in the window (missing candles): no forecast for that bar.
+min_bars = 20
+
+# Arm 1, statistics only (step 5): src/cryptonlp/forecast/arm1/. Every model is re-estimated
+# once a week (blocks start Monday 00:00 UTC) on an expanding window, and each forecast for bar
+# t uses bars up to t - 2 only (claims M14). In the loop, each weekly fit is appended to the
+# ledger as an experiment package, and every forecast cites it.
+[arm1]
+# garch, gjr, egarch: GARCH(1,1), GJR-GARCH(1,1), EGARCH(1,1) on hourly log returns.
+# har: Equation 5 of the article (RV on its daily, weekly and monthly means, in levels).
+# har_log: the log variant. hist_var: historical VaR (and large-move frequency), no RV.
+models = ["garch", "gjr", "egarch", "har", "har_log", "hist_var"]
+# Issue arm 1 forecasts in the hourly loop, next to the baseline.
+in_loop = true
+# First bar of every training window (the start of the Binance backfill).
+train_start = 2024-11-01T00:00:00Z
+# No fit, and no forecast, with fewer hourly returns than this in the training window (90 days).
+min_train_hours = 2160
+# The GARCH variance filter starts this many hours before each block (90 days); the starting
+# value's influence has decayed to ~1e-9 by then.
+filter_hours = 2160
+# A forecast needs at least this share of the bars in each window it reads (the last day for
+# every model, as the baseline's 20 of 24; each HAR mean; the historical window).
+min_coverage = 0.8
+# VaR levels (1% and 5%, article Section 4.4). VaR is stored as a positive loss in log-return
+# units; a violation is a return below -VaR.
+var_levels = [0.01, 0.05]
+# A large move is an absolute hourly return above this quantile of the training window.
+large_move_quantile = 0.95
+# Quantiles of the standardized training returns kept in each fit, for the large-move probability.
+tail_grid = 401
+# HAR means: daily, weekly and monthly, in hours.
+har_windows = [24, 168, 720]
+# Historical VaR window (30 days).
+hist_window_hours = 720
+
+# The walk-forward harness (`cryptonlp arm1 walkforward`): development data only, logged to
+# MLflow, never to the ledger.
+[walkforward]
+# First test block (a Monday). Bars before it are only ever training data: one year here.
+test_start = 2025-11-03T00:00:00Z
+# end = 2026-11-02T00:00:00Z   # last bar to test (exclusive); unset: the newest closed bar
+# nw_lags = 5                  # Newey-West lags for DM and Clark-West; unset: 4 (n/100)^(2/9)
+mlflow_experiment = "arm1-walkforward"

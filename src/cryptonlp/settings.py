@@ -32,12 +32,37 @@ class Settings(BaseSettings):
     record_replay: bool = False
     # Collector settings (watch terms, instances, symbols). Agents get read-only access.
     collectors_config: Path = Path("config/collectors.toml")
+    # Normalization rules (step 3): language, dedupe, entity lexicon, spam rules.
+    normalize_config: Path = Path("config/normalize.toml")
+    # The hourly forecast loop (step 3b): assets, settle time, baseline window.
+    loop_config: Path = Path("config/loop.toml")
+    # The labeled set (step 4): sampling plan, re-labeling, split, Label Studio address.
+    labeling_config: Path = Path("config/labeling.toml")
+    # Label Studio: a personal access token (Account & Settings, in its UI), and the address
+    # when it differs from config/labeling.toml (the scheduler reaches it inside Compose).
+    label_studio_api_key: str = ""
+    label_studio_url: str = ""
+    # Password of Label Studio's own database role (set by ``cryptonlp db init``).
+    label_studio_db_password: str = "labelstudio"
+    # Exports of the labeled set and agreement reports. They hold post URIs: git-ignored.
+    labeling_dir: Path = Path("data/labeling")
+    # HMAC key for author hashes. Outside the repository, never committed; back it up.
+    # Compose mounts it as a secret at /run/secrets/pseudonym_key.
+    pseudonym_key_file: Path = Path.home() / ".config" / "cryptonlp" / "pseudonym.key"
 
     # Study phase stamped on ledger rows the system writes on its own (chain-break violations,
     # interventions logged without --phase). Set to pilot, then confirmatory, in step 9.
     phase: Phase = Phase.DEVELOPMENT
-    # Ledger exports and the weekly anchors sent to the advisor. Git-ignored.
+    # Schedule the hourly forecast loop in ``cryptonlp serve``. Off in development except during
+    # smoke runs (tech/build-plan.md, "Run mode by phase"): its ledger rows are permanent.
+    forecast_loop: bool = False
+    # Ledger exports, the weekly anchors sent to the advisor, and the data manifests arm 1's
+    # experiment packages cite (manifests/). Git-ignored.
     ledger_dir: Path = Path("data/ledger")
+    # MLflow (step 5): walk-forward runs, later the classifier registry. Compose's ``mlflow``.
+    mlflow_tracking_uri: str = "http://127.0.0.1:5000"
+    # Walk-forward tables (metrics, comparisons, forecasts), one directory per run. Git-ignored.
+    walkforward_dir: Path = Path("data/walkforward")
 
     @property
     def raw_path(self) -> Path:
@@ -50,6 +75,26 @@ class Settings(BaseSettings):
     @property
     def ledger_path(self) -> Path:
         return _resolve(self.ledger_dir)
+
+    @property
+    def walkforward_path(self) -> Path:
+        return _resolve(self.walkforward_dir)
+
+    @property
+    def normalize_config_path(self) -> Path:
+        return _resolve(self.normalize_config)
+
+    @property
+    def labeling_config_path(self) -> Path:
+        return _resolve(self.labeling_config)
+
+    @property
+    def labeling_path(self) -> Path:
+        return _resolve(self.labeling_dir)
+
+    @property
+    def loop_config_path(self) -> Path:
+        return _resolve(self.loop_config)
 
     @property
     def collectors_config_path(self) -> Path:
