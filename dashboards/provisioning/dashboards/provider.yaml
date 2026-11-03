@@ -1,0 +1,13 @@
+# Dashboards are files in dashboards/json, rebuilt with the rest of the system.
+# Edits made in the UI are refused: change the JSON file instead.
+apiVersion: 1
+
+providers:
+  - name: cryptonlp
+    folder: cryptonlp  # found by title, so the alert rules share it
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /var/lib/grafana-dashboards

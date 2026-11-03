@@ -1,0 +1,69 @@
+# Collector settings. Read by src/cryptonlp/config.py. Agents get read-only access to config/.
+#
+# Every post stores the watch terms or tags that matched it, and every raw file stores the
+# hash of this watch list, so the list can be narrowed later but never silently changed.
+# Broadening is not retroactive: posts the list missed are gone. Err on the broad side.
+
+[watch]
+# Whole-word, case-insensitive. A leading $ or # is allowed ("$BTC", "#bitcoin").
+terms = [
+    "bitcoin", "btc", "satoshi", "lightning network",
+    "ethereum", "eth", "ether", "vitalik", "erc20", "erc-20",
+    "crypto", "cryptocurrency", "cryptocurrencies", "altcoin", "altcoins", "memecoin",
+    "stablecoin", "stablecoins", "usdt", "usdc", "tether",
+    "defi", "airdrop", "presale", "seed phrase", "rug pull", "rugpull",
+    "binance", "coinbase", "metamask",
+]
+# Cashtags only match with the $ ("$BTC"), because bare tickers like "OP" are ordinary words.
+cashtags = ["BTC", "ETH", "WBTC", "STETH", "USDT", "USDC"]
+
+[bluesky]
+# Tried in order; the next one is used after repeated failures. Cursors are resumed by time.
+jetstream_hosts = [
+    "jetstream2.us-east.bsky.network",
+    "jetstream1.us-east.bsky.network",
+    "jetstream1.us-west.bsky.network",
+    "jetstream2.us-west.bsky.network",
+]
+# Write a Parquet file at least this often (seconds) or when the buffer reaches max_rows.
+flush_seconds = 600
+max_rows = 5000
+# Lag and the cursor are reported this often (seconds), between flushes.
+heartbeat_seconds = 30
+# Resume this many seconds before the saved cursor; duplicates are dropped by URI.
+rewind_seconds = 5
+# Share of non-matching posts kept in a replay recording, so replays exercise the filter.
+replay_sample_rate = 0.001
+appview = "https://public.api.bsky.app"
+
+[mastodon]
+# Still to decide (tech/stack-and-build-guide.md). All three answer the hashtag timeline
+# without login; mastodon.social requires login for its public timeline.
+instances = ["mastodon.social", "mastodon.online", "fosstodon.org"]
+hashtags = ["bitcoin", "btc", "ethereum", "eth", "crypto", "cryptocurrency", "defi"]
+# Also poll the local public timeline, filtered by the watch terms. Off by default: most
+# large instances require login for it.
+public_timeline = false
+page_limit = 40
+# At most this many pages per timeline per poll; the rest is fetched on the next poll.
+max_pages = 10
+
+[trends]
+mastodon_limit = 20
+
+[binance]
+symbols = ["BTCUSDT", "ETHUSDT"]
+intervals = ["1m", "1h"]
+vision_base = "https://data.binance.vision"
+api_base = "https://data-api.binance.vision"
+# About 2 years before the build started (Nov 2026).
+backfill_start = "2024-11-01"
+# Re-pull this many hours before the last stored candle, since Binance restates candles.
+restate_hours = 3
+# The API tail never reaches further back than this; the daily Vision backfill fills older gaps.
+tail_max_days = 7
+
+[deletions]
+# Posts checked per run of the deletion sweep, oldest check first.
+bluesky_batch = 10000
+mastodon_batch_per_instance = 600

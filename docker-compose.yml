@@ -1,0 +1,144 @@
+name: cryptonlp
+
+# Services are added as each build step needs them (see tech/build-plan.md).
+# Step 0: Postgres + pgvector for real data, and a separate throwaway test database.
+# Step 1: Grafana (default), and the collectors with Prefect (profile "collect"):
+#   docker compose up -d --wait                    databases and Grafana
+#   docker compose --profile collect up -d --build  also start collecting into the main database
+
+# The app services share one image (Dockerfile) with only the locked dependencies; the repo is
+# bind-mounted so run IDs carry the real git commit. They run as your user, so files in data/
+# stay yours: set UID and GID in .env if yours are not 1000.
+x-app: &app
+  build: .
+  image: cryptonlp-app
+  user: "${UID:-1000}:${GID:-1000}"
+  volumes:
+    - .:/app
+  environment:
+    CRYPTONLP_DATABASE_URL: postgresql://${POSTGRES_USER:-cryptonlp}:${POSTGRES_PASSWORD:-cryptonlp}@postgres:5432/cryptonlp
+    CRYPTONLP_GRAFANA_DB_PASSWORD: ${CRYPTONLP_GRAFANA_DB_PASSWORD:-grafana}
+    CRYPTONLP_RECORD_REPLAY: ${CRYPTONLP_RECORD_REPLAY:-false}
+    PREFECT_API_URL: http://prefect-server:4200/api
+  profiles: ["collect"]
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.0-pg17
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cryptonlp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cryptonlp}
+      POSTGRES_DB: cryptonlp
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d cryptonlp"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # The only database CI, tests and the simulated clock may touch.
+  # Separate server, separate port, data on tmpfs: it can never share state with the real ledger.
+  postgres-test:
+    image: pgvector/pgvector:0.8.0-pg17
+    environment:
+      POSTGRES_USER: cryptonlp
+      POSTGRES_PASSWORD: cryptonlp
+      POSTGRES_DB: cryptonlp_test
+    ports:
+      - "127.0.0.1:${POSTGRES_TEST_PORT:-5433}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cryptonlp -d cryptonlp_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_PLUGINS_PREINSTALL_DISABLED: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana-dashboards/system-health.json
+      # Read by dashboards/provisioning (datasource password, alert contact point).
+      GRAFANA_DB_PASSWORD: ${CRYPTONLP_GRAFANA_DB_PASSWORD:-grafana}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-unset}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-unset}
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./dashboards/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards/json:/var/lib/grafana-dashboards:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # Applies db/init to the main database (idempotent) and sets Grafana's role password.
+  db-init:
+    <<: *app
+    command: ["db", "init"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  prefect-server:
+    image: prefecthq/prefect:3.9.1-python3.12
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    environment:
+      PREFECT_UI_API_URL: http://127.0.0.1:${PREFECT_PORT:-4200}/api
+    ports:
+      - "127.0.0.1:${PREFECT_PORT:-4200}:4200"
+    volumes:
+      - prefect-data:/root/.prefect
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    profiles: ["collect"]
+    restart: unless-stopped
+
+  # Runs the scheduled jobs: Mastodon, trends, Binance, deletion sync, raw-store check.
+  scheduler:
+    <<: *app
+    command: ["serve"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+      prefect-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The Bluesky stream runs for days, so it is its own service, restarted if it dies.
+  collector-bluesky:
+    <<: *app
+    command: ["collect", "bluesky"]
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+volumes:
+  pgdata:
+  grafana-data:
+  prefect-data:

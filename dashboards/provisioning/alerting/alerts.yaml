@@ -1,0 +1,179 @@
+# Alert rules and where they go. Alerts only fire while the machine running Grafana is on.
+#
+# Contact point: Telegram. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env (see
+# .env.example); until then alerts show in Grafana but are not delivered. To use email
+# instead, configure GF_SMTP_* and swap the receiver below for type: email.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: researcher
+    receivers:
+      - uid: researcher-telegram
+        type: telegram
+        settings:
+          bottoken: ${TELEGRAM_BOT_TOKEN}
+          chatid: ${TELEGRAM_CHAT_ID}
+        disableResolveMessage: false
+
+policies:
+  - orgId: 1
+    receiver: researcher
+    group_by: ["grafana_folder", "alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
+groups:
+  - orgId: 1
+    name: collectors
+    folder: cryptonlp
+    interval: 1m
+    rules:
+      # Jetstream keeps 36 hours. An hour of lag leaves time to fix the collector.
+      - uid: bluesky-lag
+        title: Bluesky lag over 1 hour
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: cryptonlp-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT coalesce(max(lag_seconds), 1e9) / 3600.0 AS lag_hours
+                FROM monitoring.collector_lag WHERE collector = 'bluesky'
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [1] }
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: Bluesky collector is more than an hour behind
+          description: >-
+            Jetstream only replays the last 36 hours; posts older than that are lost for good.
+            Check the collector-bluesky container (docker compose logs collector-bluesky).
+
+      - uid: job-failed
+        title: Scheduled job failed
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 900, to: 0 }
+            datasourceUid: cryptonlp-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT j.job, count(r.job) AS failures
+                FROM (SELECT DISTINCT job FROM monitoring.job_runs) j
+                LEFT JOIN monitoring.job_runs r
+                  ON r.job = j.job AND r.status = 'failed'
+                 AND r.started_at > now() - interval '15 minutes'
+                GROUP BY j.job
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: OK
+        execErrState: Alerting
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "Job {{ $labels.job }} failed"
+          description: The error is in the "Recent job runs" table and in the Prefect UI.
+
+      - uid: source-silent
+        title: An hour with no posts from a source
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 7200, to: 0 }
+            datasourceUid: cryptonlp-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT s.source, coalesce(sum(p.posts), 0) AS posts
+                FROM (VALUES ('bluesky'), ('mastodon')) AS s (source)
+                LEFT JOIN monitoring.posts_per_hour p
+                  ON p.source = s.source
+                 AND p.hour = date_trunc('hour', now()) - interval '1 hour'
+                GROUP BY s.source
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0m
+        labels: { severity: warning }
+        annotations:
+          summary: "No {{ $labels.source }} posts in the last full hour"
+          description: >-
+            The source is normally active every hour. Check its collector and the watch terms.
+
+  - orgId: 1
+    name: ledger
+    folder: cryptonlp
+    interval: 5m
+    rules:
+      # The daily check either found a break or didn't run. Both need a look the same day.
+      - uid: ledger-check
+        title: Ledger chain check failed or missing
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: cryptonlp-pg
+            model:
+              refId: A
+              editorMode: code
+              format: table
+              rawQuery: true
+              rawSql: >-
+                SELECT CASE WHEN count(*) = 0 THEN 1
+                            WHEN bool_and(ok) AND max(age_hours) < 26 THEN 0
+                            ELSE 1 END AS failing
+                FROM (SELECT ok, age_hours FROM monitoring.ledger_checks
+                      ORDER BY checked_at DESC LIMIT 1) AS last_check
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        noDataState: Alerting
+        execErrState: Alerting
+        for: 0m
+        labels: { severity: critical }
+        annotations:
+          summary: The ledger chain check failed, or has not run for 26 hours
+          description: >-
+            See "Recent chain checks" on the dashboard, or run `cryptonlp ledger check`. A
+            break means an entry was changed after it was written: do not repair it in place;
+            record what happened as an intervention and report it as a deviation.

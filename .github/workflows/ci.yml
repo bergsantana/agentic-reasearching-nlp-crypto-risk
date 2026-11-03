@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      # The only database CI may touch. Same image as docker-compose.yml.
+      postgres-test:
+        image: pgvector/pgvector:0.8.0-pg17
+        env:
+          POSTGRES_USER: cryptonlp
+          POSTGRES_PASSWORD: cryptonlp
+          POSTGRES_DB: cryptonlp_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U cryptonlp -d cryptonlp_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      CRYPTONLP_TEST_DATABASE_URL: postgresql://cryptonlp:cryptonlp@localhost:5433/cryptonlp_test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - name: Run ID
+        run: uv run cryptonlp-run-id
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: Type check
+        run: uv run mypy
+      - name: Tests
+        run: uv run pytest

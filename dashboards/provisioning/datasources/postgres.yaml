@@ -1,0 +1,21 @@
+# Grafana reads Postgres as grafana_reader, which can only SELECT the monitoring views
+# (db/init/002_collectors.sql). No post text or author ever reaches Grafana.
+apiVersion: 1
+
+datasources:
+  - name: cryptonlp
+    uid: cryptonlp-pg
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: grafana_reader
+    isDefault: true
+    editable: false
+    jsonData:
+      database: cryptonlp
+      sslmode: disable
+      postgresVersion: 1700
+      timescaledb: false
+      maxOpenConns: 5
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}

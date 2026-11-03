@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets: the pseudonymization key and DB passwords never enter the repo
+.env
+*.key
+
+# Data: raw store and model weights live outside git (hashes go into the ledger)
+data/
+models/
+
+# Windows download markers and editor locks
+*:Zone.Identifier
+.~lock.*#
+
+/paper
