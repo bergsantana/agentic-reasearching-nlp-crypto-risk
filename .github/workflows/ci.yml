@@ -27,7 +27,7 @@ jobs:
       CRYPTONLP_TEST_DATABASE_URL: postgresql://cryptonlp:cryptonlp@localhost:5433/cryptonlp_test
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
       - run: uv sync --locked
