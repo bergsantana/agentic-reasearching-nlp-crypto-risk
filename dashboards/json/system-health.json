@@ -1890,6 +1890,383 @@
         "type": "grafana-postgresql-datasource",
         "uid": "cryptonlp-pg"
       }
+    },
+    {
+      "type": "row",
+      "title": "Classifier (step 6)",
+      "collapsed": false,
+      "id": 36,
+      "gridPos": {
+        "x": 0,
+        "y": 74,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Last bar: minutes from close to labeled",
+      "description": "For the newest fully labeled bar, how long after it closed its last post got a label from the newest classifier version. The loop forecasts at minute 25 of the next hour, so this must stay well under 25.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 25
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 37,
+      "gridPos": {
+        "x": 0,
+        "y": 75,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cryptonlp-pg"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cryptonlp-pg"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT minutes_after_close AS value FROM monitoring.classify_per_bar WHERE newest AND waiting = 0 AND labeled > 0 ORDER BY bar_open DESC LIMIT 1"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Posts waiting for a label, last 24 hours",
+      "description": "In-study posts received in the last 24 hours (bars already closed) that the newest classifier version has not labeled.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 38,
+      "gridPos": {
+        "x": 6,
+        "y": 75,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cryptonlp-pg"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cryptonlp-pg"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(sum(waiting), 0) AS value FROM monitoring.classify_per_bar WHERE newest AND bar_open > now() - interval '24 hours' AND bar_open + interval '1 hour' < now()"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "SemIf: seconds per 1,000 posts, last 24 hours",
+      "description": "Classifier wall time per 1,000 posts (nine SemIf decisions each), from clean.classify_batches. The article reports it as latency per thousand posts.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 39,
+      "gridPos": {
+        "x": 12,
+        "y": 75,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cryptonlp-pg"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cryptonlp-pg"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 1000 * sum(seconds) / nullif(sum(posts), 0) AS value FROM monitoring.classify_throughput WHERE hour > now() - interval '24 hours' AND model_version LIKE 'semif-%'"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Posts without an embedding",
+      "description": "In-study posts with no vector from the embedding model in use (clean.embeddings).",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1000
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center"
+      },
+      "id": 40,
+      "gridPos": {
+        "x": 18,
+        "y": 75,
+        "w": 6,
+        "h": 5
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cryptonlp-pg"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cryptonlp-pg"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT coalesce(sum(waiting), 0) AS value FROM monitoring.embedding_backlog"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Minutes from bar close to all posts labeled, by classifier",
+      "description": "Per hourly bar of posts (receive time): when its last post was labeled, in minutes after the bar closed. Negative: labeled while the bar was still open. A full-store backfill shows as very large values for old bars.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 4
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "id": 41,
+      "gridPos": {
+        "x": 0,
+        "y": 80,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cryptonlp-pg"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cryptonlp-pg"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT bar_open AS time, model_version AS metric, minutes_after_close AS value FROM monitoring.classify_per_bar WHERE $__timeFilter(bar_open) AND labeled > 0 ORDER BY 1"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Classifier throughput: seconds per 1,000 posts",
+      "description": "Hourly, per classifier version.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "always",
+            "pointSize": 4
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "id": 42,
+      "gridPos": {
+        "x": 12,
+        "y": 80,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "cryptonlp-pg"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "cryptonlp-pg"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT hour AS time, model_version AS metric, seconds_per_1000 AS value FROM monitoring.classify_throughput WHERE $__timeFilter(hour) ORDER BY 1"
+        }
+      ]
     }
   ]
 }

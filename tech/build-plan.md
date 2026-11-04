@@ -198,15 +198,17 @@ Into `clean.posts` (`db/init/004_clean.sql`), every 10 minutes. Filters set flag
 - To deploy: rebuild the app image, which now needs the statistics stack (`docker compose --profile collect up -d --build`), and start MLflow (`docker compose up -d mlflow`). Until the rebuild, only the forecast loop needs the new packages; every other job imports without them
 
 ### Step 6. Classifier
-- [ ] vLLM serving the SemIf base model with a pinned revision (llama.cpp if Blackwell support fails)
-- [ ] H4, model revision, rubric and prompt hash registered
-- [ ] SemIf, OpenJev (Wortega), CryptoBERT, FinBERT and VADER scored per class and per platform
-- [ ] Calibration on the 500-post slice
-- [ ] Fallbacks chosen; versions in the MLflow registry
-- [ ] Full store classified; pgvector index built
-- [ ] SemIf swapped into the thin loop in place of `StubClassifier`
-- [ ] Grafana panel: classification latency per hour of posts
-- [ ] **Check:** H4 scored and logged; smoke run 2 passes
+`cryptonlp classify ...` (`src/cryptonlp/classify/`), settings in `config/classify.toml`, rubric in `config/semif/rubric.toml`, tables in `db/init/007_classify.sql`. vLLM servers: Compose profile `gpu` (`semif` on port 8001, `embed` on 8002); the baselines run in the `hf-scorer` container (profile `bakeoff`). Method choices: `paper/claims.md` M21–M26, D10–D11.
+- [x] vLLM serving the SemIf base model with a pinned revision: `vllm/vllm-openai:v0.33.0`, Qwen/Qwen3.5-4B at SemIf's revision `851bf6e8`, served under `<model>@<revision>` so another revision is refused. SemIf's prompt and readout reimplemented over vLLM (raw letter logits); `cryptonlp classify conformance` on SemIf's 144 published decisions: 144/144 prompt hashes and 144/144 choices identical (4 Nov 2026, claims M22). llama.cpp not needed
+- [ ] H4, model revision, rubric and prompt hash registered: `cryptonlp classify register-h4 --labeled-set <freeze manifest> --yes` (rubric document, H4 verbatim with its analysis plan, and the bake-off package, in one transaction). Margin and fallback rule decided 4 Nov 2026 (margin 0.05 at one-sided α 0.025; fallback when clearly beaten, below macro F1 0.40, or scam recall below 0.70; claims M24). Waits for: the labeled set and the rubric tuned on the calibration slice; then set `[h4] decided = true` and register from a clean commit
+- [ ] SemIf, OpenJev (Wortega), CryptoBERT, FinBERT and VADER scored per class and per platform: pipeline built and tested (`classify bakeoff export / semif / vader`, `docker compose run --rm hf-scorer <model> data/bakeoff/<run>`, `classify bakeoff evaluate`); every scorer smoke-tested on the real models (OpenJev 4B: 28 s to load, 1.9 GB of RAM, about 15 NLI pairs a second without the optional fast kernels, so roughly 40 minutes for 1,500 posts). The first OpenJev attempt crashed the whole WSL VM during its 9 GB download with Hugging Face's Xet client; the plain download (`HF_HUB_DISABLE_XET=1`, one worker) was fine. Waits for the labeled set. The test split cannot be exported before H4 is registered
+- [ ] Calibration on the 500-post calibration slice: `classify bakeoff evaluate` on a calibration-only run fits one temperature per model and task and prints SemIf's for `[semif.temperatures]` (claims M23). Waits for the labeled set
+- [ ] Fallbacks chosen; versions in the MLflow registry: `classify bakeoff evaluate <run> --register` applies the fallback rule and registers each task's classifier as `cryptonlp-classifier-<task>`, alias `live` (move the alias to roll back). Waits for the test run
+- [ ] Full store classified; pgvector index built: `cryptonlp classify run` and `cryptonlp classify embed` (HNSW cosine index in `clean.embeddings`; hourly embeddings when `CRYPTONLP_EMBEDDINGS=true`). Not run on the main database yet: SemIf labels there make `normalize rebuild` refuse, and the step 3 hand review may still need a rebuild. Run after it. Measured on 300 real posts: 239 s per 1,000 posts (claims M26)
+- [x] SemIf swapped into the thin loop in place of `StubClassifier` (`[loop] classifier = "semif"` in `config/classify.toml`; `"stub"` still works). With `semif`, the `gpu` profile must be up whenever the loop runs, or the hour's posts wait unlabeled
+- [x] Grafana panel: classification latency per hour of posts (row "Classifier (step 6)": minutes from bar close to all posts labeled, posts waiting, seconds per 1,000 posts, posts without an embedding)
+- [ ] **Check:** H4 scored and logged; smoke run 2 passes (`docker compose --profile gpu up -d --wait`, then as smoke run 1 with `CRYPTONLP_FORECAST_LOOP=true`)
+- **Memory:** Docker here shares a 6 GB RAM cap across all containers. `semif` + `embed` + the collection stack fit; adding `hf-scorer` did not (4 Nov 2026: the kernel killed both vLLM engines and Postgres went through crash recovery, without data loss). Run the bake-off scorers with `semif` and `embed` stopped, or raise the cap. The vLLM and scorer containers are marked to be killed first
 
 ### Step 7. Agent foundation and control panel
 - [ ] One MCP server per role, exposing only the tools in that role's row of the Agents table

@@ -180,6 +180,7 @@ class HourlyLoop:
             now=ledger.database_clock(conn),
             run_id=self.run_id,
             batch_size=self.config.loop.classify_batch,
+            clock=lambda: ledger.database_clock(conn),
         )
 
     def features(self, conn: psycopg.Connection, stats: LoopStats) -> None:

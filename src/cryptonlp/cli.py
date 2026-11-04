@@ -22,6 +22,9 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 
 from cryptonlp import db, ledger, ops
+from cryptonlp.classify import Classifier, classify_pending
+from cryptonlp.classify.config import load_classify_config
+from cryptonlp.classify.errors import ClassifyError
 from cryptonlp.collectors import binance, bluesky, deletions, mastodon, replay, trends
 from cryptonlp.collectors.common import Recorder, WatchFilter, http_client
 from cryptonlp.config import CollectorsConfig, load_config
@@ -222,8 +225,8 @@ def normalize_job(
         key = load_key(ctx.settings.pseudonym_key_file)
         normalizer = Normalizer(load_normalize_config(), key, ctx.store, ctx.run_id)
         if rebuild:
-            # Stub labels are thrown away with the posts. Any other labels (a real classifier,
-            # the human passes) make this refuse; so will vectors, once they refer to these rows.
+            # Stub labels and embeddings are thrown away with the posts. Any other labels (a real
+            # classifier, the human passes) make this refuse.
             row = conn.execute(
                 "SELECT count(*) FROM clean.labels WHERE model_version <> %s", (STUB_VERSION,)
             ).fetchone()
@@ -231,20 +234,37 @@ def normalize_job(
                 raise RuntimeError(
                     f"clean.labels holds {row[0]} labels besides the stub's: not rebuilding"
                 )
-            conn.execute("TRUNCATE clean.labels, clean.minhash, clean.posts")
+            conn.execute("TRUNCATE clean.labels, clean.embeddings, clean.minhash, clean.posts")
         return asdict(normalizer.run(conn, max_batches=max_batches))
 
     return job
 
 
+def _classifier(settings: Settings, name: str | None = None) -> Classifier:
+    """The classifier config/classify.toml names (or ``name``): SemIf on its vLLM server, or
+    the step 3b stub."""
+    config = load_classify_config(settings.classify_config_path)
+    if (name or config.loop.classifier) == "stub":
+        return StubClassifier()
+    from cryptonlp.classify.semif import SemIfClassifier
+
+    return SemIfClassifier.connect(config, settings.semif_url or None)
+
+
+def _close(classifier: Classifier) -> None:
+    close = getattr(classifier, "close", None)
+    if close is not None:
+        close()
+
+
 # The forecast modules need the statistics stack (pandas, arch), imported only by the jobs and
 # commands that forecast, so every other scheduled job keeps running on an older image.
-def _loop(ctx: Context) -> HourlyLoop:
+def _loop(ctx: Context, classifier: Classifier) -> HourlyLoop:
     from cryptonlp.forecast.loop import HourlyLoop
 
     return HourlyLoop.default(
         load_loop_config(ctx.settings.loop_config_path),
-        StubClassifier(),
+        classifier,
         ctx.store,
         phase=ctx.settings.phase,
         run_id=ctx.run_id,
@@ -261,7 +281,50 @@ def _loop_result(stats: LoopStats) -> dict[str, Any]:
 
 
 def job_forecast_loop(conn: psycopg.Connection, ctx: Context) -> dict[str, Any]:
-    return _loop_result(_loop(ctx).run(conn))
+    classifier = _classifier(ctx.settings)
+    try:
+        return _loop_result(_loop(ctx, classifier).run(conn))
+    finally:
+        _close(classifier)
+
+
+def classify_job(
+    name: str | None = None, limit: int | None = None
+) -> Callable[[psycopg.Connection, Context], dict[str, Any]]:
+    """Label every in-study post the classifier hasn't labeled yet (the whole store at first)."""
+
+    def job(conn: psycopg.Connection, ctx: Context) -> dict[str, Any]:
+        classifier = _classifier(ctx.settings, name)
+        try:
+            n = classify_pending(
+                conn,
+                classifier,
+                now=ledger.database_clock(conn),
+                run_id=ctx.run_id,
+                batch_size=500,
+                clock=lambda: ledger.database_clock(conn),
+                limit=limit,
+            )
+        finally:
+            _close(classifier)
+        return {"labeled": n, "model_version": classifier.model_version}
+
+    return job
+
+
+def embed_job(limit: int | None = None) -> Callable[[psycopg.Connection, Context], dict[str, Any]]:
+    """Embed every in-study post without a vector from the embedding model (pgvector)."""
+
+    def job(conn: psycopg.Connection, ctx: Context) -> dict[str, Any]:
+        from cryptonlp.classify import embed
+
+        cfg = load_classify_config(ctx.settings.classify_config_path).embed
+        with embed.connect(cfg, ctx.settings.embed_url or None) as client:
+            client.served()
+            n = embed.embed_pending(conn, client, cfg, run_id=ctx.run_id, limit=limit)
+        return {"embedded": n, "model_version": cfg.model_version}
+
+    return job
 
 
 def _studio(settings: Settings) -> Studio:
@@ -294,6 +357,8 @@ JOBS: dict[str, Callable[[psycopg.Connection, Context], dict[str, Any]]] = {
     "ledger_anchor": job_ledger_anchor,
     "forecast_loop": job_forecast_loop,
     "labeling_sync": job_labeling_sync,
+    "classify": classify_job(),
+    "embed": embed_job(),
 }
 
 
@@ -456,9 +521,13 @@ def cmd_loop_run(args: argparse.Namespace) -> None:
     if args.test:
         ctx = Context(args)
         print(f"run ID {ctx.run_id}", flush=True)
-        with _connect_test() as conn:
-            db.apply_init_sql(conn)
-            stats = _loop_result(_loop(ctx).run(conn))
+        classifier = _classifier(ctx.settings)
+        try:
+            with _connect_test() as conn:
+                db.apply_init_sql(conn)
+                stats = _loop_result(_loop(ctx, classifier).run(conn))
+        finally:
+            _close(classifier)
         print(json.dumps(stats, default=str), flush=True)
         return
     if not args.yes:
@@ -477,11 +546,15 @@ def cmd_loop_simulate(args: argparse.Namespace) -> None:
     ctx = Context(args)
     ctx.store = RawStore(Path(args.raw_dir))
     print(f"run ID {ctx.run_id}", flush=True)
-    with _connect_test() as conn:
-        db.apply_init_sql(conn)
-        from cryptonlp.forecast.loop import simulate
+    classifier = _classifier(ctx.settings, args.classifier)
+    try:
+        with _connect_test() as conn:
+            db.apply_init_sql(conn)
+            from cryptonlp.forecast.loop import simulate
 
-        runs = simulate(conn, _loop(ctx), start, end, minute=args.minute)
+            runs = simulate(conn, _loop(ctx, classifier), start, end, minute=args.minute)
+    finally:
+        _close(classifier)
     for stats in runs:
         print(json.dumps(stats.as_dict(), default=str), flush=True)
     failed = [s for s in runs if s.errors]
@@ -640,6 +713,255 @@ def cmd_labeling_freeze(args: argparse.Namespace) -> None:
         "experiment package, and log the stage 3 approval with `cryptonlp ledger intervene "
         "--stage 3 --type approval --checkpoint --reason ...`."
     )
+
+
+def cmd_classify_check(args: argparse.Namespace) -> None:
+    settings = Settings()
+    config = load_classify_config(settings.classify_config_path)
+    from cryptonlp.classify import embed
+    from cryptonlp.classify.semif import SemIfClassifier
+
+    report: dict[str, Any] = {}
+    classifier = SemIfClassifier.connect(config, settings.semif_url or None)
+    try:
+        report["semif"] = classifier.check()
+    finally:
+        classifier.close()
+    if not args.no_embed:
+        with embed.connect(config.embed, settings.embed_url or None) as client:
+            served = client.served()
+            dims = len(client.embed(["$BTC just broke 100k"])[0])
+            report["embed"] = {"served": served.id, "dimensions": dims}
+            if dims != config.embed.dimensions:
+                sys.exit(f"embed: {dims} dimensions, config says {config.embed.dimensions}")
+    print(json.dumps(report, indent=2))
+
+
+def cmd_classify_conformance(args: argparse.Namespace) -> None:
+    from cryptonlp.classify import conformance
+    from cryptonlp.classify.semif import SemIfClassifier
+
+    settings = Settings()
+    config = load_classify_config(settings.classify_config_path)
+    run_id = new_run_id()
+    print(f"run ID {run_id}", flush=True)
+    classifier = SemIfClassifier.connect(config, settings.semif_url or None)
+    try:
+        classifier.check()
+        result = conformance.check(classifier.scorer)
+    finally:
+        classifier.close()
+    report = {"run_id": run_id, "served": config.semif.served_name, **conformance.as_dict(result)}
+    out = settings.bakeoff_path / f"conformance-{run_id}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
+    print(f"written to {out}")
+    if not result.passed:
+        sys.exit("conformance FAILED: SemIf on vLLM does not answer as SemIf's reference")
+
+
+def cmd_classify_run(args: argparse.Namespace) -> None:
+    if args.test:
+        ctx = Context(args)
+        print(f"run ID {ctx.run_id}", flush=True)
+        with _connect_test() as conn:
+            db.apply_init_sql(conn)
+            stats = classify_job(args.classifier, args.limit)(conn, ctx)
+        print(json.dumps(stats), flush=True)
+        return
+    run_job("classify", classify_job(args.classifier, args.limit), args)
+
+
+def cmd_classify_embed(args: argparse.Namespace) -> None:
+    if args.test:
+        ctx = Context(args)
+        print(f"run ID {ctx.run_id}", flush=True)
+        with _connect_test() as conn:
+            db.apply_init_sql(conn)
+            stats = embed_job(args.limit)(conn, ctx)
+        print(json.dumps(stats), flush=True)
+        return
+    run_job("embed", embed_job(args.limit), args)
+
+
+def _bakeoff_run(path: str) -> Path:
+    run = Path(path)
+    if not run.is_absolute() and not run.exists():
+        run = Settings().bakeoff_path / path
+    return run
+
+
+def cmd_bakeoff_export(args: argparse.Namespace) -> None:
+    from cryptonlp.classify import bakeoff
+
+    settings = Settings()
+    config = load_classify_config(settings.classify_config_path)
+    run_id = new_run_id()
+    print(f"run ID {run_id}", flush=True)
+    splits = list(bakeoff.SPLITS) if args.split == "all" else [args.split]
+    out = settings.bakeoff_path / run_id
+    with _ledger_conn(args) as conn:
+        manifest = bakeoff.export(conn, config, out, splits=splits, run_id=run_id)
+    print(json.dumps(manifest, indent=2, default=str))
+    print(
+        f"run directory {out}. Next: `cryptonlp classify bakeoff semif {run_id}`, `... vader "
+        f"{run_id}`, and `docker compose run --rm hf-scorer <cryptobert|finbert|openjev> "
+        f"data/bakeoff/{run_id}`. The directory holds post text: never commit it."
+    )
+
+
+def cmd_bakeoff_semif(args: argparse.Namespace) -> None:
+    from cryptonlp.classify import bakeoff
+    from cryptonlp.classify.semif import SemIfClassifier
+
+    settings = Settings()
+    config = load_classify_config(settings.classify_config_path)
+    classifier = SemIfClassifier.connect(config, settings.semif_url or None)
+    try:
+        meta = bakeoff.score_semif(_bakeoff_run(args.run), classifier, repeat=config.bakeoff.repeat)
+    finally:
+        classifier.close()
+    print(json.dumps(meta, indent=2))
+
+
+def cmd_bakeoff_vader(args: argparse.Namespace) -> None:
+    from cryptonlp.classify import bakeoff
+
+    print(json.dumps(bakeoff.score_vader(_bakeoff_run(args.run)), indent=2))
+
+
+def cmd_bakeoff_evaluate(args: argparse.Namespace) -> None:
+    from cryptonlp.classify import bakeoff
+
+    settings = Settings()
+    config = load_classify_config(settings.classify_config_path)
+    run_id = new_run_id()
+    print(f"run ID {run_id}", flush=True)
+    run = _bakeoff_run(args.run)
+    ev = bakeoff.evaluate(run, config, eval_run_id=run_id)
+    report = bakeoff.write_report(run, ev)
+    print((report / "report.md").read_text())
+    print(f"report in {report}")
+    if ev.split == "calibration":
+        semif = ev.temperatures.get("semif")
+        if semif:
+            print(
+                "Temperatures fitted on the calibration slice. To use them, set in "
+                "config/classify.toml (before registering H4):\n[semif.temperatures]"
+            )
+            for task, t in semif.items():
+                print(f"{task} = {t:.4f}")
+    if args.no_mlflow:
+        return
+    uri = args.tracking_uri or settings.mlflow_tracking_uri
+    mlflow_run = bakeoff.log_to_mlflow(
+        run, report, ev, config, tracking_uri=uri, register=args.register
+    )
+    print(f"MLflow run {mlflow_run} at {uri}")
+
+
+def cmd_classify_register_h4(args: argparse.Namespace) -> None:
+    from cryptonlp.classify import register
+
+    settings = Settings()
+    config = load_classify_config(settings.classify_config_path)
+    run_id = new_run_id()
+    phase = Phase(args.phase or settings.phase)
+    document, hypothesis, package = register.records(
+        config, labeled_set=Path(args.labeled_set), phase=phase, run_id=run_id
+    )
+    print(f"run ID {run_id}", flush=True)
+    print(
+        json.dumps(
+            {
+                "rubric": {
+                    "key": document.document_key,
+                    "version": document.version,
+                    "sha256": document.content_sha256,
+                },
+                "hypothesis": hypothesis.model_dump(mode="json"),
+                "package": {k: v for k, v in package.items() if k not in {"phase"}},
+            },
+            indent=2,
+            default=str,
+        )
+    )
+    if not args.test and not args.yes:
+        sys.exit(
+            "the main ledger keeps these for good: re-run with --yes to register, or "
+            "--test to try it on the test database"
+        )
+    with _ledger_conn(args) as conn:
+        entries = register.register(
+            conn, config, labeled_set=Path(args.labeled_set), phase=phase, run_id=run_id
+        )
+    for entry in entries:
+        _print_entry(entry)
+
+
+def _add_classify_parser(sub: Any) -> None:
+    p = sub.add_parser("classify", help="SemIf, embeddings and the bake-off (step 6)")
+    c_sub = p.add_subparsers(dest="action", required=True)
+
+    q = c_sub.add_parser("check", help="the vLLM servers serve the pinned models, prompts match")
+    q.add_argument("--no-embed", action="store_true", help="skip the embedding server")
+    q.set_defaults(func=cmd_classify_check)
+
+    q = c_sub.add_parser(
+        "conformance", help="SemIf's 144 reference decisions through our vLLM readout"
+    )
+    q.set_defaults(func=cmd_classify_conformance)
+
+    q = c_sub.add_parser("run", help="label every in-study post not labeled yet")
+    q.add_argument("--classifier", choices=["semif", "stub"], help="default: config")
+    q.add_argument("--limit", type=int, help="stop after N posts")
+    q.add_argument("--test", action="store_true", help="the test database instead")
+    q.set_defaults(func=cmd_classify_run)
+
+    q = c_sub.add_parser("embed", help="embed every in-study post without a vector (pgvector)")
+    q.add_argument("--limit", type=int, help="stop after N posts")
+    q.add_argument("--test", action="store_true", help="the test database instead")
+    q.set_defaults(func=cmd_classify_embed)
+
+    q = c_sub.add_parser("register-h4", help="register the rubric, H4 and its package")
+    q.add_argument(
+        "--labeled-set",
+        required=True,
+        help="the manifest `cryptonlp labeling freeze` wrote (data/labeling/...)",
+    )
+    q.add_argument("--phase", choices=[ph.value for ph in Phase], help="default CRYPTONLP_PHASE")
+    q.add_argument("--yes", action="store_true", help="write to the main ledger")
+    q.add_argument("--test", action="store_true", help="the test database instead")
+    q.set_defaults(func=cmd_classify_register_h4)
+
+    b = c_sub.add_parser("bakeoff", help="score the classifiers on the labeled set (H4)")
+    b_sub = b.add_subparsers(dest="bakeoff_action", required=True)
+    q = b_sub.add_parser("export", help="write a run directory with the labeled posts")
+    q.add_argument(
+        "--split",
+        required=True,
+        choices=["calibration", "test", "all"],
+        help="test needs H4 registered first",
+    )
+    q.add_argument("--test", action="store_true", help="the test database instead")
+    q.set_defaults(func=cmd_bakeoff_export)
+    q = b_sub.add_parser("semif", help="score a run with SemIf (vLLM server)")
+    q.add_argument("run", help="run directory or run ID under data/bakeoff")
+    q.set_defaults(func=cmd_bakeoff_semif)
+    q = b_sub.add_parser("vader", help="score a run with VADER")
+    q.add_argument("run")
+    q.set_defaults(func=cmd_bakeoff_vader)
+    q = b_sub.add_parser("evaluate", help="calibrate, score, test H4, report, log to MLflow")
+    q.add_argument("run")
+    q.add_argument("--no-mlflow", action="store_true", help="only write the report")
+    q.add_argument(
+        "--register",
+        action="store_true",
+        help="register each task's chosen classifier in the MLflow registry",
+    )
+    q.add_argument("--tracking-uri", help="default CRYPTONLP_MLFLOW_TRACKING_URI")
+    q.set_defaults(func=cmd_bakeoff_evaluate)
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
@@ -822,6 +1144,7 @@ def main(argv: list[str] | None = None) -> None:
         default=str(REPO_ROOT / "data" / "replay-store"),
         help="raw store the replay wrote to (default data/replay-store)",
     )
+    q.add_argument("--classifier", choices=["semif", "stub"], help="default: config/classify.toml")
     q.set_defaults(func=cmd_loop_simulate)
 
     p = sub.add_parser("arm1", help="arm 1, statistics only (step 5)")
@@ -839,6 +1162,7 @@ def main(argv: list[str] | None = None) -> None:
     q.set_defaults(func=cmd_arm1_walkforward)
 
     _add_labeling_parser(sub)
+    _add_classify_parser(sub)
 
     p = sub.add_parser("serve", help="run the scheduled jobs with Prefect")
     p.set_defaults(func=cmd_serve)
@@ -853,5 +1177,6 @@ def main(argv: list[str] | None = None) -> None:
         labeling_sample.DrawError,
         labeling_store.FreezeError,
         StudioError,
+        ClassifyError,
     ) as exc:
         sys.exit(f"error: {exc}")

@@ -8,8 +8,9 @@ on purpose. Every rule label gets the same confidence, 0.5, since the rules carr
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
+from typing import Any
 
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -164,6 +165,14 @@ class StubClassifier:
 
     def __init__(self) -> None:
         self._vader = SentimentIntensityAnalyzer()
+
+    @property
+    def spec(self) -> Mapping[str, Any]:
+        return {
+            "classifier": "stub",
+            "sentiment": "VADER compound, cut-offs 0.05",
+            "rules": "regex",
+        }
 
     def classify(
         self, posts: Sequence[PostText], *, labeled_at: datetime, run_id: str

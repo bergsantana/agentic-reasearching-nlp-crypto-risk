@@ -1,0 +1,162 @@
+# SemIf rubric: the criterion and option descriptions SemIf (and Wortega's OpenJev, in the
+# bake-off) scores every post against. The definitions follow the labeling manual
+# (src/cryptonlp/labeling/manual.md, section 5), which the human labels follow too.
+#
+# Rules (article Section 4.7; paper/claims.md P18):
+# - Tune this file only on the 500 calibration posts (`cryptonlp classify bakeoff ... --split
+#   calibration`), never on the test posts.
+# - Then register it in the ledger with H4 (`cryptonlp classify register-h4`), before the 1,500
+#   test posts are scored. Its hash is part of the prompt hash on every label.
+# - After registration, a change is a new version: bump `version`, register it again with the
+#   reason, and report it in the table of deviations.
+#
+# Each [[decisions]] is one SemIf call per post. The post is the state (SemIf's "evidence"). The
+# options are shown to the model as letters A, B, C... in the order written here, so the order is
+# part of the rubric. Topic takes more than one label, and SemIf picks exactly one option, so
+# each topic is its own yes/no decision; "other" is the outcome when no topic gets "yes"
+# (paper/claims.md M21).
+
+version = "draft-1"
+
+[[decisions]]
+id = "sentiment"
+task = "sentiment"
+question = """How does this social media post read for someone holding the crypto assets, projects or market it discusses? Read sarcasm and irony for what the author means. Crypto slang has a direction: "moon", "LFG", "WAGMI", "bullish" and "pump" are positive; "rekt", "NGMI", "rug", "dump" and "bearish" are negative. When one side clearly dominates, choose it; choose neutral only when neither does."""
+
+[[decisions.options]]
+id = "negative"
+description = "Negative: pessimistic, bearish, fearful, angry or disapproving about crypto, or it reports bad news such as price falls, losses, hacks, bans, outages or outflows. Warnings about scams are negative."
+
+[[decisions.options]]
+id = "neutral"
+description = "Neutral: factual with no good or bad side, a question, how-to content, positive and negative parts that balance, or no stance on crypto at all."
+
+[[decisions.options]]
+id = "positive"
+description = "Positive: optimistic, bullish, approving or excited about crypto, or it reports good news such as price gains, adoption, approvals or inflows."
+
+[[decisions]]
+id = "topic.price_talk"
+task = "topic"
+label = "price_talk"
+question = """Is price talk a substantive part of this social media post, not just a passing word? Price talk covers prices, charts, trading, positions, predictions, gains and losses, liquidations, market moves and fund flows."""
+
+[[decisions.options]]
+id = "no"
+description = "No: the post is not about prices, trading or market moves, or mentions them only in passing."
+
+[[decisions.options]]
+id = "yes"
+description = "Yes: prices, trading, positions, predictions, gains or losses, liquidations, market moves or fund flows are a substantive part of the post."
+
+[[decisions]]
+id = "topic.regulation"
+task = "topic"
+label = "regulation"
+question = """Is regulation a substantive part of this social media post, not just a passing word? Regulation covers laws, regulators, courts, enforcement, taxes, government policy on crypto, and ETF approvals or rejections."""
+
+[[decisions.options]]
+id = "no"
+description = "No: the post is not about laws, regulators, courts, taxes or government policy, or mentions them only in passing."
+
+[[decisions.options]]
+id = "yes"
+description = "Yes: laws, regulators, courts, enforcement, taxes, government policy on crypto, or ETF approvals or rejections are a substantive part of the post."
+
+[[decisions]]
+id = "topic.security_incident"
+task = "topic"
+label = "security_incident"
+question = """Is a security incident a substantive part of this social media post, not just a passing word? Security incidents cover hacks, exploits, thefts, phishing, rug pulls, vulnerabilities, and scam reports and warnings."""
+
+[[decisions.options]]
+id = "no"
+description = "No: the post is not about hacks, exploits, thefts, phishing, rug pulls, vulnerabilities or scam warnings, or mentions them only in passing."
+
+[[decisions.options]]
+id = "yes"
+description = "Yes: a hack, exploit, theft, phishing attempt, rug pull, vulnerability, or a scam report or warning is a substantive part of the post."
+
+[[decisions]]
+id = "topic.protocol_tech"
+task = "topic"
+label = "protocol_tech"
+question = """Is protocol or technology a substantive part of this social media post, not just a passing word? Protocol or technology covers development, upgrades, forks, layer 2s, mining, nodes, validators and staking mechanics, fees and network performance, and wallets as software."""
+
+[[decisions.options]]
+id = "no"
+description = "No: the post is not about how a blockchain, protocol or wallet works or is developed, or mentions it only in passing."
+
+[[decisions.options]]
+id = "yes"
+description = "Yes: development, upgrades, forks, layer 2s, mining, nodes, validators, staking mechanics, fees, network performance or wallet software are a substantive part of the post."
+
+[[decisions]]
+id = "topic.launch_airdrop"
+task = "topic"
+label = "launch_airdrop"
+question = """Is a launch or airdrop a substantive part of this social media post, not just a passing word? Launches and airdrops cover new tokens, token sales and presales, airdrops, mints, and listings on exchanges."""
+
+[[decisions.options]]
+id = "no"
+description = "No: the post is not about new tokens, token sales, presales, airdrops, mints or exchange listings, or mentions them only in passing."
+
+[[decisions.options]]
+id = "yes"
+description = "Yes: a new token, a token sale or presale, an airdrop, a mint or a listing on an exchange is a substantive part of the post."
+
+[[decisions]]
+id = "topic.macro"
+task = "topic"
+label = "macro"
+question = """Is macroeconomics a substantive part of this social media post, not just a passing word? Macro covers interest rates, inflation, central banks, the economy, stock markets, the dollar, tariffs and geopolitics."""
+
+[[decisions.options]]
+id = "no"
+description = "No: the post is not about interest rates, inflation, central banks, the economy, stock markets, the dollar, tariffs or geopolitics, or mentions them only in passing."
+
+[[decisions.options]]
+id = "yes"
+description = "Yes: interest rates, inflation, central banks, the economy, stock markets, the dollar, tariffs or geopolitics are a substantive part of the post."
+
+[[decisions]]
+id = "scam"
+task = "scam"
+question = """Is this social media post organic, a promotion, or a likely scam? A post that only mentions a project is not promotion; it becomes promotion when it asks the reader to act. Choose likely scam over promotion when a reader who follows the post would probably lose money to deception, not just to a bad investment."""
+
+[[decisions.options]]
+id = "organic"
+description = "Organic: ordinary discussion, news, analysis or opinion, including posts about the author's own trades and warnings about scams."
+
+[[decisions.options]]
+id = "promotion"
+description = "Promotion: tries to get readers to buy a token, join a group or channel, sign up, follow, or use a referral link or code; advertises a token, project, service or signal group; or is hype with no content, such as \"next 100x gem, don't miss it\"."
+
+[[decisions.options]]
+id = "likely_scam"
+description = "Likely scam: tries to get money, keys or wallet access through deception, such as giveaways that ask you to send crypto first, fake support or fund recovery, \"claim\" or \"verify your wallet\" links, impersonation, or guaranteed returns."
+
+[[decisions]]
+id = "event"
+task = "event"
+question = """Which specific real-world event does this social media post report or discuss as having happened, or as officially announced? Predictions, rumors, questions, general remarks such as "hacks are everywhere" and scam attempts in progress are not events. Past events count when the post reports them as news or discusses them specifically, not when they are only an example. If the post reports more than one event, choose the main one; if none is clearly the main one, prefer hack, then outage, then regulatory action, then listing."""
+
+[[decisions.options]]
+id = "none"
+description = "None: no such event is reported."
+
+[[decisions.options]]
+id = "hack"
+description = "Hack: a theft, exploit or breach of a protocol, exchange, bridge, wallet or its users."
+
+[[decisions.options]]
+id = "outage"
+description = "Outage: an exchange, network, wallet or service is down, halted or degraded, for example withdrawals paused or a chain halted."
+
+[[decisions.options]]
+id = "listing"
+description = "Listing: an exchange lists or delists a token, or opens a new trading pair or product."
+
+[[decisions.options]]
+id = "regulatory_action"
+description = "Regulatory action: a regulator, court, government or police acts, such as a lawsuit, fine, ban, approval, arrest or sanction, or a law passed or signed."

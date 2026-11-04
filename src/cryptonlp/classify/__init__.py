@@ -1,7 +1,8 @@
 """Classification: the interface every classifier implements, and labels in ``clean.labels``.
 
-``StubClassifier`` (``cryptonlp.stubs``) implements it now; SemIf replaces it in step 6 without
-other changes.
+``StubClassifier`` (``cryptonlp.stubs``) was the step 3b stand-in; ``SemIfClassifier``
+(``cryptonlp.classify.semif``) is the study's classifier from step 6. ``config/classify.toml``
+chooses which one the hourly loop uses.
 """
 
 from cryptonlp.classify.base import Classifier, PostText

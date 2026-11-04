@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
-from collections.abc import Sequence
-from datetime import datetime
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -76,6 +78,29 @@ def _check(classifier: Classifier, posts: Sequence[PostText], labels: list[Label
         raise RuntimeError(f"labels carry model versions {sorted(versions)}")
 
 
+def register_version(conn: psycopg.Connection, classifier: Classifier, run_id: str) -> None:
+    """Record the classifier version's spec, once. A version string already recorded with a
+    different spec is an error: the labels would no longer say what produced them."""
+    spec = dict(classifier.spec)
+    canonical = json.dumps(spec, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    prompt = spec.get("prompt_sha256")
+    conn.execute(
+        "INSERT INTO clean.classifier_versions "
+        "(model_version, spec, spec_sha256, prompt_sha256, run_id) "
+        "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (model_version) DO NOTHING",
+        (classifier.model_version, Jsonb(spec), digest, prompt, run_id),
+    )
+    row = conn.execute(
+        "SELECT spec_sha256 FROM clean.classifier_versions WHERE model_version = %s",
+        (classifier.model_version,),
+    ).fetchone()
+    if row is None or row[0] != digest:
+        raise RuntimeError(
+            f"classifier version {classifier.model_version} is recorded with another spec"
+        )
+
+
 def classify_pending(
     conn: psycopg.Connection,
     classifier: Classifier,
@@ -83,19 +108,35 @@ def classify_pending(
     now: datetime,
     run_id: str,
     batch_size: int = 2000,
+    clock: Callable[[], datetime] | None = None,
+    limit: int | None = None,
 ) -> int:
-    """Label every in-study post received by ``now`` that this classifier hasn't labeled yet.
-    ``conn`` must be autocommit. Returns the number of posts labeled."""
+    """Label every in-study post received by ``now`` that this classifier hasn't labeled yet,
+    up to ``limit`` posts. ``conn`` must be autocommit. Each batch's labels carry the time
+    ``clock`` gives when the batch is done (the database clock in the loop; ``now`` if no clock
+    is given). Returns the number of posts labeled."""
+    register_version(conn, classifier, run_id)
     total = 0
-    while True:
+    while limit is None or total < limit:
+        size = batch_size if limit is None else min(batch_size, limit - total)
         rows = conn.execute(
             PENDING_SQL,
-            {"now": now, "version": classifier.model_version, "limit": batch_size},
+            {"now": now, "version": classifier.model_version, "limit": size},
         ).fetchall()
         if not rows:
-            return total
+            break
         posts = [PostText(*r) for r in rows]
+        started = datetime.now(UTC)
         labels = classifier.classify(posts, labeled_at=now, run_id=run_id)
         _check(classifier, posts, labels)
+        if clock is not None:
+            at = clock()
+            labels = [label.model_copy(update={"labeled_at": at}) for label in labels]
         write_labels(conn, posts, labels)
+        conn.execute(
+            "INSERT INTO clean.classify_batches (model_version, posts, started_at, finished_at, "
+            "run_id) VALUES (%s, %s, %s, %s, %s)",
+            (classifier.model_version, len(posts), started, datetime.now(UTC), run_id),
+        )
         total += len(posts)
+    return total

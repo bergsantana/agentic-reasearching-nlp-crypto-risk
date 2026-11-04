@@ -347,6 +347,8 @@ Backfilled posts are kept out of the study for three reasons:
 
 - **GPU:** an RTX 5070 Ti with 16 GB. SemIf's 4B base model in BF16 takes about 8 GB of weights. Running a second local LLM at the same time is tight. Run them one after the other, or quantize the agent model.
 - **Blackwell support:** the 5070 Ti is a Blackwell card. Check that the pinned PyTorch, CUDA and vLLM versions support it. If vLLM doesn't, use llama.cpp.
+- **Measured in step 6 (4 Nov 2026):** vLLM 0.33.0 serves Qwen3.5-4B in BF16 on the card (8.0 GiB of weights; at 74% of the card, 2.3 GiB of KV cache, about 44,000 tokens). The embedding model (Qwen3-Embedding-0.6B) fits next to it at 20%. OpenJev 4B (bake-off only) needs both stopped.
+- **Docker's RAM cap:** Docker on this machine shares one 6 GB memory cap across all containers. SemIf, the embedder and the collection stack fit under it; adding the bake-off scorer did not, and Postgres went through crash recovery. Run the scorer alone, or raise the cap in the WSL/Docker settings. Download large checkpoints with `HF_HUB_DISABLE_XET=1`: a Xet download of OpenJev's 9 GB file crashed the WSL VM (4 Nov 2026).
 - **WSL2 and Docker:** GPU access inside Docker on WSL2 needs the NVIDIA Container Toolkit. Test `nvidia-smi` inside a container before building on it.
 - **Langfuse:** self-hosting the current version needs more than Postgres (check its own Compose file). Budget for the extra services or start with its cloud free tier.
 

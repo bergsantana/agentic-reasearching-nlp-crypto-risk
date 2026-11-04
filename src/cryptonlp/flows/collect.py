@@ -1,6 +1,7 @@
 """Prefect flows and schedules: the step 1 jobs, step 2 ledger checks, step 3 normalization, the
-step 3b forecast loop when ``CRYPTONLP_FORECAST_LOOP`` is true, and the step 4 labeling sync
-when a Label Studio token is set.
+step 3b forecast loop when ``CRYPTONLP_FORECAST_LOOP`` is true (it labels with the classifier
+``config/classify.toml`` names, SemIf from step 6), the step 4 labeling sync when a Label Studio
+token is set, and the step 6 embeddings when ``CRYPTONLP_EMBEDDINGS`` is true.
 
 The Bluesky stream is not here: it runs for days, so it is its own Compose service
 (``collector-bluesky``), restarted automatically. Everything else runs on a schedule.
@@ -91,6 +92,12 @@ def labeling_sync() -> dict[str, Any]:
     return _run("labeling_sync")
 
 
+# Embeds new in-study posts for the Analyst's search; needs the `embed` server (profile "gpu").
+@flow(name="embed", retries=1, retry_delay_seconds=120)
+def embed() -> dict[str, Any]:
+    return _run("embed")
+
+
 # (flow, cron in UTC). Development needs less (tech/build-plan.md, "Run mode by phase"), but
 # these are cheap, and post data only builds up with time.
 SCHEDULES = (
@@ -110,6 +117,7 @@ SCHEDULES = (
 # forecast for the next bar is in about 35 minutes before it opens.
 FORECAST_LOOP_CRON = "25 * * * *"
 LABELING_SYNC_CRON = "50 * * * *"
+EMBED_CRON = "40 * * * *"
 
 
 def schedules(settings: Settings | None = None) -> list[tuple[Any, str]]:
@@ -117,6 +125,8 @@ def schedules(settings: Settings | None = None) -> list[tuple[Any, str]]:
     extra = [(forecast_loop, FORECAST_LOOP_CRON)] if settings.forecast_loop else []
     if settings.label_studio_api_key:
         extra.append((labeling_sync, LABELING_SYNC_CRON))
+    if settings.embeddings:
+        extra.append((embed, EMBED_CRON))
     return [*SCHEDULES, *extra]
 
 

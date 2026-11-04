@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     mlflow_tracking_uri: str = "http://127.0.0.1:5000"
     # Walk-forward tables (metrics, comparisons, forecasts), one directory per run. Git-ignored.
     walkforward_dir: Path = Path("data/walkforward")
+    # The classifier (step 6): SemIf on vLLM, embeddings, the bake-off. The servers' addresses
+    # when they differ from config/classify.toml (the scheduler reaches them inside Compose).
+    classify_config: Path = Path("config/classify.toml")
+    semif_url: str = ""
+    embed_url: str = ""
+    # Embed new in-study posts every hour in ``cryptonlp serve`` (needs the `embed` server).
+    embeddings: bool = False
+    # Bake-off inputs, raw predictions and reports, one directory per run. They hold post URIs
+    # and text: git-ignored.
+    bakeoff_dir: Path = Path("data/bakeoff")
 
     @property
     def raw_path(self) -> Path:
@@ -91,6 +101,14 @@ class Settings(BaseSettings):
     @property
     def labeling_path(self) -> Path:
         return _resolve(self.labeling_dir)
+
+    @property
+    def classify_config_path(self) -> Path:
+        return _resolve(self.classify_config)
+
+    @property
+    def bakeoff_path(self) -> Path:
+        return _resolve(self.bakeoff_dir)
 
     @property
     def loop_config_path(self) -> Path:

@@ -3,10 +3,10 @@ lexicon in normalization (claims M6), so no classifier labels ``entity``."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from cryptonlp.schemas.labels import Label, Task
 
@@ -26,6 +26,11 @@ class Classifier(Protocol):
     model_version: str
     # Every post gets exactly one label for each of these tasks.
     tasks: frozenset[Task]
+
+    # What decides the labels (model, revision, prompt hash, temperatures...), recorded once per
+    # version in ``clean.classifier_versions``.
+    @property
+    def spec(self) -> Mapping[str, Any]: ...
 
     def classify(
         self, posts: Sequence[PostText], *, labeled_at: datetime, run_id: str

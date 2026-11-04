@@ -6,8 +6,11 @@ name: cryptonlp
 # Step 3: normalization runs in the scheduler, with the pseudonymization key as a secret.
 # Step 4: Label Studio (profile "collect"), with its own database on the main server.
 # Step 5: MLflow (default), for the walk-forward runs; the classifier registry joins it in step 6.
+# Step 6: SemIf's base model and the embedding model on vLLM (profile "gpu"), and the bake-off's
+#   transformers scorer (profile "bakeoff", run on demand).
 #   docker compose up -d --wait                    databases and Grafana
 #   docker compose --profile collect up -d --build  also start collecting into the main database
+#   docker compose --profile gpu up -d --wait       SemIf and the embeddings (needs the GPU)
 
 # The app services share one image (Dockerfile) with only the locked dependencies; the repo is
 # bind-mounted so run IDs carry the real git commit. They run as your user, so files in data/
@@ -139,6 +142,11 @@ services:
       CRYPTONLP_MLFLOW_TRACKING_URI: http://mlflow:5000
       PREFECT_API_URL: http://prefect-server:4200/api
       CRYPTONLP_PSEUDONYM_KEY_FILE: /run/secrets/pseudonym_key
+      # Step 6: the vLLM servers (profile "gpu"). The forecast loop labels with SemIf
+      # (config/classify.toml); embeddings are scheduled only when CRYPTONLP_EMBEDDINGS is true.
+      CRYPTONLP_SEMIF_URL: http://semif:8000
+      CRYPTONLP_EMBED_URL: http://embed:8000
+      CRYPTONLP_EMBEDDINGS: ${CRYPTONLP_EMBEDDINGS:-false}
     secrets:
       - pseudonym_key
     depends_on:
@@ -213,6 +221,133 @@ services:
       timeout: 5s
       retries: 30
     restart: unless-stopped
+
+  # Step 6: SemIf's base model, served for its option logits (src/cryptonlp/classify/vllm.py).
+  # Pinned to SemIf's own revision and served under "<model>@<revision>", the name
+  # config/classify.toml asks for, so a server on another revision is refused. Raw logits, not
+  # log-probabilities, are returned for the requested tokens (SemIf's readout). Weights are
+  # cached in ~/.cache/huggingface. On the 16 GB card it shares the GPU with `embed`; stop both
+  # before the bake-off's `hf-scorer` runs OpenJev (another 4B model).
+  semif:
+    image: vllm/vllm-openai:v0.33.0
+    command:
+      - Qwen/Qwen3.5-4B
+      - --revision=851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+      - --tokenizer-revision=851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+      - --served-model-name=Qwen/Qwen3.5-4B@851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+      - --dtype=bfloat16
+      - --max-model-len=8192
+      - --gpu-memory-utilization=${SEMIF_GPU_MEMORY:-0.74}
+      # Prompts are short (a post plus a rubric item): a smaller batch envelope leaves the
+      # memory to the KV cache. 8.0 GiB of weights, measured 4 Nov 2026.
+      - --max-num-seqs=64
+      - --max-num-batched-tokens=8192
+      - --logprobs-mode=raw_logits
+      - --max-logprobs=16
+      - --enable-prefix-caching
+      - --limit-mm-per-prompt={"image":0,"video":0}
+      - --generation-config=vllm
+      - --seed=0
+    environment:
+      HF_HOME: /hf
+    volumes:
+      - ${HOME}/.cache/huggingface:/hf
+    ipc: host
+    # Docker on this machine shares one memory cap across containers: if it is reached, the
+    # kernel should kill this server, never Postgres or a collector.
+    oom_score_adj: 800
+    ports:
+      - "127.0.0.1:${SEMIF_PORT:-8001}:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 600s  # first start compiles CUDA graphs for a few minutes
+    profiles: ["gpu"]
+    restart: unless-stopped
+
+  # Step 6: embeddings for the Analyst's semantic search (clean.embeddings, pgvector).
+  embed:
+    image: vllm/vllm-openai:v0.33.0
+    command:
+      - Qwen/Qwen3-Embedding-0.6B
+      - --revision=97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+      - --tokenizer-revision=97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+      - --served-model-name=Qwen/Qwen3-Embedding-0.6B@97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3
+      - --runner=pooling
+      # Posts are short; longer ones are cut to this many tokens (classify/embed.py).
+      - --max-model-len=2048
+      - --max-num-batched-tokens=2048
+      - --max-num-seqs=64
+      - --enforce-eager
+      - --gpu-memory-utilization=${EMBED_GPU_MEMORY:-0.20}
+      - --seed=0
+    environment:
+      HF_HOME: /hf
+    volumes:
+      - ${HOME}/.cache/huggingface:/hf
+    ipc: host
+    # Docker on this machine shares one memory cap across containers: if it is reached, the
+    # kernel should kill this server, never Postgres or a collector.
+    oom_score_adj: 800
+    ports:
+      - "127.0.0.1:${EMBED_PORT:-8002}:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      semif:
+        condition: service_healthy  # vLLM sizes its memory from what is free: start second
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 90s
+    profiles: ["gpu"]
+    restart: unless-stopped
+
+  # Step 6 bake-off: CryptoBERT, FinBERT and Wortega's OpenJev with transformers, from the
+  # vLLM image (its PyTorch supports the Blackwell card). Run on demand, one model at a time,
+  # with `semif` and `embed` stopped (GPU memory, and Docker's shared RAM cap: 4 Nov 2026 the
+  # three together pushed Postgres into crash recovery):
+  #   docker compose run --rm hf-scorer <model> <run directory under data/bakeoff>
+  # It reads only the bake-off inputs and writes only the raw scores (scripts/hf_score.py).
+  hf-scorer:
+    image: vllm/vllm-openai:v0.33.0
+    entrypoint: ["python3", "/app/scripts/hf_score.py"]
+    environment:
+      HF_HOME: /hf
+      OWNER_UID: ${UID:-1000}
+      OWNER_GID: ${GID:-1000}
+    volumes:
+      - ${HOME}/.cache/huggingface:/hf
+      - ./scripts:/app/scripts:ro
+      - ./config:/app/config:ro
+      - ./data/bakeoff:/app/data/bakeoff
+    ipc: host
+    oom_score_adj: 800
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles: ["bakeoff"]
+    restart: "no"
 
 # The key never enters the repository. Create it once with `uv run cryptonlp keygen`.
 secrets:

@@ -1,0 +1,115 @@
+# Step 6: the classifier. SemIf on vLLM, the embeddings for the Analyst's search, and the
+# bake-off that scores SemIf against Wortega's OpenJev, CryptoBERT, FinBERT and VADER (H4).
+# Agents get read-only access. Every SemIf label carries a model version derived from
+# [semif], the rubric and the temperatures, so changing any of them labels posts anew instead of
+# overwriting.
+
+[loop]
+# Which classifier the hourly loop and `cryptonlp classify run` use: "semif", or "stub" (the
+# step 3b stand-in). With "semif", the vLLM server (Compose service `semif`, profile "gpu") must
+# be up whenever the loop runs, or the hour's posts wait unlabeled (forecasts still go in).
+classifier = "semif"
+
+[semif]
+# The vLLM server, as the host sees it (the scheduler uses CRYPTONLP_SEMIF_URL instead).
+url = "http://127.0.0.1:8001"
+# The base model SemIf's results are reported on, at SemIf's own pinned revision
+# (manifests/models.json in the SemIf repository). The server must serve it under the name
+# "<model>@<revision>" (docker-compose.yml does), so a server on another revision is refused.
+model = "Qwen/Qwen3.5-4B"
+revision = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+dtype = "bfloat16"
+# The model's chat template, vendored from that revision, and the rubric (registered with H4).
+chat_template = "config/semif/qwen3.5-4b-chat_template.jinja"
+rubric = "config/semif/rubric.toml"
+# Requests in flight at once. vLLM batches them and reuses each post's prefix across its nine
+# decisions.
+concurrency = 48
+timeout_seconds = 120
+
+# One temperature per task, fitted on the calibration slice by `cryptonlp classify bakeoff
+# calibrate` (SemIf's own method: softmax(logits / T), T minimizing the log loss). 1.0 means
+# uncalibrated. Changing a value changes the model version, so posts are labeled again.
+[semif.temperatures]
+sentiment = 1.0
+topic = 1.0
+scam = 1.0
+event = 1.0
+
+# Embeddings for the Analyst's semantic search (pgvector, clean.embeddings). Compose service
+# `embed`, profile "gpu".
+[embed]
+url = "http://127.0.0.1:8002"
+model = "Qwen/Qwen3-Embedding-0.6B"
+revision = "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"
+dimensions = 1024
+batch = 64
+# Posts longer than this many tokens are cut (the `embed` server's --max-model-len).
+max_tokens = 2048
+
+[bakeoff]
+# The baselines run in the vLLM image with transformers (scripts/hf_score.py, Compose service
+# `hf-scorer`), one model at a time; VADER runs here.
+mlflow_experiment = "classifier-bakeoff"
+# Calibration-error bins (equal width on the top probability).
+ece_bins = 15
+# Test posts SemIf scores a second time, in another batch order, to measure how often the label
+# changes (article Section 4.7, "reclassificando 200 postagens"; claims R3).
+repeat = 200
+
+[bakeoff.cryptobert]
+repo = "ElKulako/cryptobert"
+revision = "9e37c910fe87727cb842a9ac55c6388256fe0f15"
+max_tokens = 128
+dtype = "float32"  # as its model card runs it
+# H4's mapping, in this order (claims M7).
+labels = { Bearish = "negative", Neutral = "neutral", Bullish = "positive" }
+
+[bakeoff.finbert]
+repo = "ProsusAI/finbert"
+revision = "0bc2ac10dda6929bcb1f77ccc43c7ec5c424f031"
+max_tokens = 512
+dtype = "float32"
+labels = { negative = "negative", neutral = "neutral", positive = "positive" }
+
+# Wortega's OpenJev 4B v5 (a different project from SemIf): every option becomes one NLI
+# hypothesis over the post, built from the same rubric, and the option probabilities are
+# P(entailment) normalized over the options (its code/openjev_decide.py).
+[bakeoff.openjev]
+repo = "AlexWortega/openjev"
+subfolder = "qwen3.5-4b-nli-v5"
+revision = "a20448012c213128955ca0c693e7c943865cab77"
+max_tokens = 4096
+dtype = "bfloat16"  # its modeling_openjev.py default
+
+# H4 (article Section 4.8): "Após calibração, o SemIf atinge F1 macro em sentimento igual ou
+# superior ao do CryptoBERT no conjunto de teste." Tested as non-inferiority: SemIf's sentiment
+# macro F1 minus CryptoBERT's, on the 1,500 test posts, by a paired bootstrap over posts; H4 holds
+# when the one-sided lower bound at level alpha is above -margin (paper/claims.md M24).
+[h4]
+# Chosen 4 Nov 2026. Margin 0.05: with 1,500 posts the difference between two equally good models
+# has a standard error of about 0.015, so 0.05 is the smallest margin the test detects reliably
+# (91% power when SemIf equals CryptoBERT), and smaller than the gaps usually reported between
+# sentiment-model families. Alpha 0.025 one-sided: the non-inferiority convention, the same as
+# the two-sided 95% interval staying above -0.05.
+# `cryptonlp classify register-h4` refuses while `decided = false`: flip it when you register.
+decided = true
+margin = 0.05
+alpha = 0.025
+bootstrap = 10000
+seed = 20261104
+
+# When a task stops using SemIf (article Section 4.7, "Se o SemIf ficar abaixo de um limiar
+# pré-registrado ..."). Chosen 4 Nov 2026, registered with H4. On the test split, both platforms,
+# unweighted, SemIf leaves a task when any of these holds:
+# 1. another model scored on the task is clearly better: the one-sided lower bound, at `alpha`,
+#    of (its macro F1 - SemIf's), by the same paired bootstrap as H4 (replicates and seed from
+#    [h4]), is above 0;
+# 2. SemIf's macro F1 is below `min_macro_f1` (barely above chance on a three-class task);
+# 3. scam only: SemIf's recall of "likely_scam" is below `min_scam_recall` (the costliest errors).
+# The task then uses the best model that clearly beat SemIf (else the best other model by macro
+# F1) until one fine-tuned on the Curator's labels replaces it.
+[fallback]
+alpha = 0.025
+min_macro_f1 = 0.40
+min_scam_recall = 0.70

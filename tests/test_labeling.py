@@ -313,7 +313,7 @@ class FakeStudio:
 @pytest.fixture
 def day(db: psycopg.Connection, tmp_path: Path) -> Iterator[psycopg.Connection]:
     db.execute("TRUNCATE labeling.batches, labeling.studio_deletions RESTART IDENTITY CASCADE")
-    db.execute("TRUNCATE clean.labels, clean.minhash, clean.posts")
+    db.execute("TRUNCATE clean.labels, clean.embeddings, clean.minhash, clean.posts")
     store_ = RawStore(tmp_path / "raw")
     store_.store_posts(db, POSTS, RUN)
     Normalizer(load_normalize_config(), KEY, store_, RUN).run(db)

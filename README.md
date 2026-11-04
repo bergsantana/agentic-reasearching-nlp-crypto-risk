@@ -76,9 +76,9 @@ One cycle, at minute 25 of every hour: label new in-study posts (`clean.labels`)
 features of every bar that has closed and settled (`features.hourly`), forecast the next bar into
 the ledger before it opens, and score every forecast whose bar has closed. Every step reads the
 database clock, the one the ledger checks deadlines against. Forecasters: the "yesterday's
-volatility" baseline and arm 1 (step 5, below). The classifier is still a stand-in,
-`StubClassifier` (VADER and keyword rules, `model_version = "stub"`), behind the interface SemIf
-will use (`cryptonlp.classify.Classifier`). Settings: `config/loop.toml`.
+volatility" baseline and arm 1 (step 5, below). The classifier is SemIf (step 6, below), or the
+step 3b stand-in `StubClassifier` (VADER and keyword rules, `model_version = "stub"`), as
+`config/classify.toml` `[loop] classifier` says. Settings: `config/loop.toml`.
 
 ```bash
 uv run cryptonlp loop run --test         # one cycle against the test database
@@ -138,6 +138,44 @@ Each day is drawn in strata by platform and by candidate status (scam or promoti
 version. A deletion at the source removes the item, its annotations and its Label Studio task.
 `draw`, `relabel`, `push`, `status`, `agreement` and `freeze` take `--test`: the test database,
 with "TEST" in the Label Studio project titles.
+
+## Classifier (step 6)
+
+SemIf (Lee, 2026) on the base model it was published with, Qwen3.5-4B at revision `851bf6e8`,
+served by vLLM (Compose profile `gpu`, port 8001). SemIf's prompt is built here exactly as SemIf
+builds it, and its answer is read the same way: the raw logits of the option letters, softmaxed.
+Each post gets nine decisions from the rubric (`config/semif/rubric.toml`): sentiment, scam, event,
+and one yes/no per topic. Labels go to `clean.labels` with a model version that changes whenever
+the revision, the rubric or the calibration temperatures do. Settings: `config/classify.toml`.
+Embeddings (Qwen3-Embedding-0.6B, port 8002) go to `clean.embeddings` (pgvector) for the Analyst.
+
+```bash
+docker compose --profile gpu up -d --wait   # SemIf and the embeddings (GPU; first start ~5 min)
+uv run cryptonlp classify check             # pinned revisions served, prompts render as the server's
+uv run cryptonlp classify conformance       # SemIf's 144 published decisions through our readout
+uv run cryptonlp classify run [--limit N]   # label in-study posts not labeled yet (the whole store)
+uv run cryptonlp classify embed             # embed posts without a vector
+```
+
+The bake-off (H4) scores SemIf, Wortega's OpenJev, CryptoBERT, FinBERT and VADER on the frozen
+labeled set. Tune the rubric on the calibration slice only, register H4, then score the test split:
+
+```bash
+uv run cryptonlp classify bakeoff export --split calibration   # -> data/bakeoff/<run ID>/
+uv run cryptonlp classify bakeoff semif <run ID>
+uv run cryptonlp classify bakeoff vader <run ID>
+docker compose --profile gpu stop           # the scorer needs the GPU and RAM to itself
+docker compose run --rm hf-scorer cryptobert data/bakeoff/<run ID>   # also finbert, openjev
+uv run cryptonlp classify bakeoff evaluate <run ID>   # temperatures, metrics, report, MLflow
+# set [semif.temperatures] and decide [h4] (margin, fallback threshold, decided = true), commit
+uv run cryptonlp classify register-h4 --labeled-set data/labeling/labeled-set-<run ID>.parquet --yes
+uv run cryptonlp classify bakeoff export --split all   # refused until H4 is registered
+# ... score every model as above, then:
+uv run cryptonlp classify bakeoff evaluate <run ID> --register   # H4 test, fallback, MLflow registry
+```
+
+Docker on this machine shares one 6 GB RAM cap across containers: never run `hf-scorer` while the
+`gpu` profile is up (the scorer refuses if the GPU or RAM is too full).
 
 ## Pre-registration ledger (step 2)
 

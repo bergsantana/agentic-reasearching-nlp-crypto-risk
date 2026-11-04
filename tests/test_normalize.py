@@ -337,7 +337,7 @@ def test_batching_does_not_change_any_decision(
 ) -> None:
     Normalizer(cfg, KEY, stored, run_id).run(db)
     all_at_once = by_n(db)
-    db.execute("TRUNCATE clean.labels, clean.minhash, clean.posts")
+    db.execute("TRUNCATE clean.labels, clean.embeddings, clean.minhash, clean.posts")
     stats = Normalizer(cfg, KEY, stored, run_id).run(db, batch_size=1)
     assert stats.batches == 8
     assert by_n(db) == all_at_once
