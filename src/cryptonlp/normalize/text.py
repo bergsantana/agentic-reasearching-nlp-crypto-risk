@@ -16,6 +16,15 @@ _HAS_DIGIT = re.compile(r"\S*\d\S*")
 _SPACE = re.compile(r"\s+")
 
 
+def strip_nul(text: str) -> str:
+    """Drop NUL characters: PostgreSQL text cannot hold them, and they carry no meaning.
+
+    Some clients mangle escapes (``\\u00e9`` arrives as NUL followed by ``e9``); the raw
+    store keeps the post as received, the clean copy loses only the NULs.
+    """
+    return text.replace("\x00", "")
+
+
 def fold(text: str) -> str:
     """NFKC, case-folded, whitespace collapsed: what "the same text" means for dedupe."""
     return _SPACE.sub(" ", unicodedata.normalize("NFKC", text).casefold()).strip()

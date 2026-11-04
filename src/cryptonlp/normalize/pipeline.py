@@ -29,7 +29,7 @@ from cryptonlp.normalize.entities import AssetMatcher, addresses, cashtags, hash
 from cryptonlp.normalize.language import identify
 from cryptonlp.normalize.pseudonym import PseudonymKey
 from cryptonlp.normalize.spam import SpamFilter
-from cryptonlp.normalize.text import URL, text_sha256
+from cryptonlp.normalize.text import URL, strip_nul, text_sha256
 from cryptonlp.rawstore import RawStore
 
 log = logging.getLogger(__name__)
@@ -177,6 +177,9 @@ class Normalizer:
             for row in table.to_pylist():
                 if row["uri"] in uris:
                     row["raw_file_id"] = file_id
+                    # Every rule below sees the same text that is stored.
+                    row["text"] = strip_nul(row["text"])
+                    row["langs"] = [strip_nul(t) for t in row["langs"] or ()]
                     posts.append(row)
         if len(posts) != len(pending):
             raise RuntimeError(

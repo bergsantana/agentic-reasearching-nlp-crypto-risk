@@ -388,3 +388,19 @@ def test_review_sample(
 def test_text_hash_ignores_case_and_spacing() -> None:
     assert text_sha256("Bitcoin  UP\n") == text_sha256("bitcoin up")
     assert text_sha256("bitcoin up") != text_sha256("bitcoin down")
+
+
+@pytest.mark.db
+def test_nul_characters_do_not_block_the_batch(
+    db: psycopg.Connection, store: RawStore, cfg: NormalizeConfig, run_id: str
+) -> None:
+    # Seen live: a client that writes é as NUL + "e9". PostgreSQL rejects NUL in text.
+    mangled = "La Cor\x00e9e du Nord promet une riposte \x00e0 la politique des \x00c9tats-Unis"
+    store.store_posts(db, [raw(1, mangled, 0, langs=("fr\x00",)), raw(2, NEWS, 1)], run_id)
+    stats = Normalizer(cfg, KEY, store, run_id).run(db)
+    assert stats.normalized == 2
+    text, langs, digest = db.execute(
+        "SELECT text, langs_declared, text_sha256 FROM clean.posts WHERE uri LIKE '%/1'"
+    ).fetchone()
+    assert text == mangled.replace("\x00", "") and langs == ["fr"]
+    assert digest == text_sha256(text)

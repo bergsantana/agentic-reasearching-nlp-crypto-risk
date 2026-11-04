@@ -211,9 +211,13 @@ def test_bakeoff_from_the_labeled_set_to_h4(
     assert ev.split == "calibration" and ev.h4 is None
     assert set(ev.temperatures) == {"semif", "vader"}
 
-    # Registration needs the margin decided, and goes in all at once.
+    # Registration needs the margin decided, and goes in all at once. Both states are set here
+    # explicitly, so the test does not depend on what config/classify.toml currently says.
+    undecided = cfg.model_copy(update={"h4": cfg.h4.model_copy(update={"decided": False})})
     with pytest.raises(register.RegistrationError, match="decided"):
-        register.register(conn, cfg, labeled_set=labeled_set, phase=Phase.DEVELOPMENT, run_id=RUN)
+        register.register(
+            conn, undecided, labeled_set=labeled_set, phase=Phase.DEVELOPMENT, run_id=RUN
+        )
     decided = cfg.model_copy(update={"h4": cfg.h4.model_copy(update={"decided": True})})
     entries = register.register(
         conn, decided, labeled_set=labeled_set, phase=Phase.DEVELOPMENT, run_id=RUN
