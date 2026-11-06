@@ -12,7 +12,7 @@ from __future__ import annotations
 import itertools
 import math
 import random
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,7 +20,7 @@ import psycopg
 import pytest
 
 from cryptonlp import ledger
-from cryptonlp.classify import PostText
+from cryptonlp.classify import PostText, classify_pending
 from cryptonlp.collectors.binance import write_klines
 from cryptonlp.db import DatabaseGuardError
 from cryptonlp.features import nlp
@@ -37,7 +37,7 @@ from cryptonlp.rawstore import CollectedPost, RawStore
 from cryptonlp.schemas import Origin, RawPost, Source
 from cryptonlp.schemas.common import BAR, Asset, Phase
 from cryptonlp.schemas.features import HourlyFeatures
-from cryptonlp.schemas.labels import Task
+from cryptonlp.schemas.labels import Label, Task
 from cryptonlp.settings import Settings
 from cryptonlp.stubs import StubClassifier
 
@@ -400,6 +400,61 @@ def test_a_second_run_in_the_same_hour_changes_nothing(
     assert (first[0].forecasts, again[0].forecasts, again[0].already_issued) == (2, 0, 2)
     assert again[0].labeled == again[0].features_written == 0
     assert conn.execute("SELECT count(*) FROM ledger.predictions").fetchone() == (2,)
+
+
+class SlowStub(StubClassifier):
+    """The stub, taking ten minutes of simulated time per batch."""
+
+    def __init__(self, conn: psycopg.Connection) -> None:
+        super().__init__()
+        self.conn = conn
+
+    def classify(
+        self, posts: Sequence[PostText], *, labeled_at: datetime, run_id: str
+    ) -> list[Label]:
+        now = ledger.database_clock(self.conn)
+        ledger.set_simulated_clock(self.conn, now + timedelta(minutes=10))
+        return super().classify(posts, labeled_at=labeled_at, run_id=run_id)
+
+
+@pytest.mark.db
+def test_a_classifier_backlog_never_delays_the_forecast(
+    day: tuple[psycopg.Connection, RawStore, dict[Asset, dict[datetime, float]]],
+) -> None:
+    conn, store, _ = day
+    config = LoopConfig(
+        loop=LoopSection(features_lookback_hours=4, classify_batch=1, classify_budget_minutes=15),
+        baseline=BaselineSection(window_hours=24, min_bars=20),
+    )
+    loop = HourlyLoop.default(config, SlowStub(conn), store, phase=DEV, run_id=RUN)
+    # All five posts are waiting at 02:25. Batch one ends at 02:35, inside the budget; batch two
+    # ends at 02:45, past it, so no third batch starts and the forecasts go in at 02:45.
+    first = simulate(conn, loop, DAY + 2 * BAR, DAY + 2 * BAR + timedelta(minutes=30))[0]
+    assert not first.errors, first.errors
+    assert (first.labeled, first.unlabeled) == (2, 3)
+    assert (first.forecasts, first.late) == (2, 0)
+    issued = conn.execute("SELECT DISTINCT issued_at FROM ledger.predictions").fetchall()
+    assert issued == [(DAY + 2 * BAR + timedelta(minutes=45),)]
+    # Oldest first: posts 1 and 2. Their bar (00:00) still waits for post 3.
+    labeled = conn.execute(
+        "SELECT DISTINCT uri FROM clean.labels WHERE model_version = 'stub' ORDER BY 1"
+    ).fetchall()
+    assert [u for (u,) in labeled] == [POSTS[0].post.uri, POSTS[1].post.uri]
+    assert first.features_waiting > 0
+    # The next run carries on where this one stopped.
+    second = simulate(conn, loop, DAY + 3 * BAR, DAY + 3 * BAR + timedelta(minutes=30))[0]
+    assert (second.labeled, second.unlabeled, second.forecasts) == (2, 1, 2)
+
+
+def test_a_deadline_needs_a_clock() -> None:
+    with pytest.raises(ValueError, match="needs a clock"):
+        classify_pending(
+            None,  # type: ignore[arg-type]  # refused before the connection is used
+            StubClassifier(),
+            now=DAY,
+            run_id=RUN,
+            deadline=DAY,
+        )
 
 
 @pytest.mark.db

@@ -30,7 +30,7 @@ import pandas as pd
 import psycopg
 
 from cryptonlp import ledger
-from cryptonlp.classify import Classifier, classify_pending
+from cryptonlp.classify import Classifier, classify_pending, count_pending
 from cryptonlp.features import bars, nlp
 from cryptonlp.forecast import arm1
 from cryptonlp.forecast.arm1.live import Arm1Runner
@@ -75,6 +75,7 @@ ORDER BY p.seq
 class LoopStats:
     started_at: str = ""
     labeled: int = 0
+    unlabeled: int = 0  # in-study posts still waiting for the classifier after this run
     features_written: int = 0
     features_waiting: int = 0
     forecasts: int = 0
@@ -174,14 +175,20 @@ class HourlyLoop:
     # --- steps -------------------------------------------------------------------------------
 
     def classify(self, conn: psycopg.Connection, stats: LoopStats) -> None:
+        # Within a budget: after a pause (the loop off, the vLLM server down) the backlog can take
+        # longer than the time left before the deadline, and the forecast must not wait for it.
+        # Oldest posts go first, so the bars fill in order; the rest wait for the next run.
+        now = ledger.database_clock(conn)
         stats.labeled = classify_pending(
             conn,
             self.classifier,
-            now=ledger.database_clock(conn),
+            now=now,
             run_id=self.run_id,
             batch_size=self.config.loop.classify_batch,
             clock=lambda: ledger.database_clock(conn),
+            deadline=now + self.config.loop.classify_budget,
         )
+        stats.unlabeled = count_pending(conn, self.classifier.model_version, now)
 
     def features(self, conn: psycopg.Connection, stats: LoopStats) -> None:
         cfg = self.config.loop

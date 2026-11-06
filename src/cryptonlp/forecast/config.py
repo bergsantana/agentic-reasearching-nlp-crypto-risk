@@ -17,7 +17,8 @@ class LoopSection(Record):
     assets: tuple[Asset, ...] = (Asset.BTC, Asset.ETH)
     features_settle_minutes: int = Field(default=20, ge=0, lt=60)
     features_lookback_hours: int = Field(default=48, gt=0)
-    classify_batch: int = Field(default=2000, gt=0)
+    classify_batch: int = Field(default=500, gt=0)
+    classify_budget_minutes: int = Field(default=15, gt=0, lt=60)
 
     @property
     def settle(self) -> timedelta:
@@ -26,6 +27,10 @@ class LoopSection(Record):
     @property
     def lookback(self) -> timedelta:
         return timedelta(hours=self.features_lookback_hours)
+
+    @property
+    def classify_budget(self) -> timedelta:
+        return timedelta(minutes=self.classify_budget_minutes)
 
 
 class BaselineSection(Record):

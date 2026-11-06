@@ -399,8 +399,10 @@ def test_nul_characters_do_not_block_the_batch(
     store.store_posts(db, [raw(1, mangled, 0, langs=("fr\x00",)), raw(2, NEWS, 1)], run_id)
     stats = Normalizer(cfg, KEY, store, run_id).run(db)
     assert stats.normalized == 2
-    text, langs, digest = db.execute(
+    row = db.execute(
         "SELECT text, langs_declared, text_sha256 FROM clean.posts WHERE uri LIKE '%/1'"
     ).fetchone()
+    assert row is not None
+    text, langs, digest = row
     assert text == mangled.replace("\x00", "") and langs == ["fr"]
     assert digest == text_sha256(text)

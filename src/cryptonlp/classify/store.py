@@ -28,6 +28,16 @@ ORDER BY p.received_at, p.source, p.uri
 LIMIT %(limit)s
 """
 
+COUNT_PENDING_SQL = """
+SELECT count(*)
+FROM clean.study_posts p
+WHERE p.received_at <= %(now)s
+  AND NOT EXISTS (
+      SELECT 1 FROM clean.labels l
+      WHERE l.source = p.source AND l.uri = p.uri AND l.model_version = %(version)s
+  )
+"""
+
 # A post deleted at the source while its batch was being classified is skipped.
 INSERT_SQL = """
 INSERT INTO clean.labels (
@@ -101,6 +111,12 @@ def register_version(conn: psycopg.Connection, classifier: Classifier, run_id: s
         )
 
 
+def count_pending(conn: psycopg.Connection, model_version: str, now: datetime) -> int:
+    """In-study posts received by ``now`` that ``model_version`` hasn't labeled yet."""
+    row = conn.execute(COUNT_PENDING_SQL, {"now": now, "version": model_version}).fetchone()
+    return int(row[0]) if row else 0
+
+
 def classify_pending(
     conn: psycopg.Connection,
     classifier: Classifier,
@@ -110,14 +126,21 @@ def classify_pending(
     batch_size: int = 2000,
     clock: Callable[[], datetime] | None = None,
     limit: int | None = None,
+    deadline: datetime | None = None,
 ) -> int:
     """Label every in-study post received by ``now`` that this classifier hasn't labeled yet,
-    up to ``limit`` posts. ``conn`` must be autocommit. Each batch's labels carry the time
-    ``clock`` gives when the batch is done (the database clock in the loop; ``now`` if no clock
-    is given). Returns the number of posts labeled."""
+    oldest first, up to ``limit`` posts. ``conn`` must be autocommit. Each batch's labels carry
+    the time ``clock`` gives when the batch is done (the database clock in the loop; ``now`` if
+    no clock is given). With a ``deadline``, no batch starts once ``clock`` has reached it (a
+    batch already running finishes); the rest wait for the next call. Returns the number of
+    posts labeled."""
+    if deadline is not None and clock is None:
+        raise ValueError("a deadline needs a clock")
     register_version(conn, classifier, run_id)
     total = 0
     while limit is None or total < limit:
+        if deadline is not None and clock is not None and clock() >= deadline:
+            break
         size = batch_size if limit is None else min(batch_size, limit - total)
         rows = conn.execute(
             PENDING_SQL,

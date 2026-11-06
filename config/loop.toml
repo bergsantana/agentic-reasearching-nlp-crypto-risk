@@ -12,8 +12,14 @@ assets = ["BTC", "ETH"]
 features_settle_minutes = 20
 # How far back the loop looks for bars still missing features (the first run, or after a pause).
 features_lookback_hours = 48
-# Posts per classifier call.
-classify_batch = 2000
+# Posts per classifier call. SemIf labels about 4 posts a second (claims M26), so a batch of 500
+# takes about 2 minutes: the most the budget below can be overrun by.
+classify_batch = 500
+# The classify step stops starting batches after this long, so a backlog (the loop switched off
+# for a while, the vLLM server down) never delays the forecast past its deadline: the loop starts
+# at minute 25, and the forecast is due at minute 60. Oldest posts go first; the rest wait for
+# the next run, and so do the features of the bars they belong to.
+classify_budget_minutes = 15
 
 # "Yesterday's volatility": every arm must beat it (design doc, Forecasting arms).
 [baseline]
